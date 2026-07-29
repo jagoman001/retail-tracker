@@ -47,6 +47,12 @@ function saleRow(s, opts = {}) {
   row["Payment Method"] = s.paymentMethod;
   return row;
 }
+// If a sale was logged against a tracked inventory item, reduce that item's
+// stock by the quantity sold (never below zero).
+function applySaleToInventory(sale, inventory) {
+  if (!sale.inventoryItemId) return inventory;
+  return inventory.map((it) => (it.id === sale.inventoryItemId ? { ...it, qty: Math.max(0, it.qty - sale.qty) } : it));
+}
 // SHA-256 hash via the browser's built-in Web Crypto API — no secret ever
 // touches storage or the source code in plaintext.
 async function hashSecret(value) {
@@ -85,6 +91,7 @@ export default function RetailTrackerApp() {
   const [shops, setShops] = useState([]);
   const [users, setUsers] = useState([]);
   const [sales, setSales] = useState([]);
+  const [inventory, setInventory] = useState([]);
   const [soloBiz, setSoloBiz] = useState([]);
   const [bossCodeHash, setBossCodeHash] = useState(null);
   const [bossRecoveryHash, setBossRecoveryHash] = useState(null);
@@ -94,13 +101,14 @@ export default function RetailTrackerApp() {
 
   useEffect(() => {
     (async () => {
-      const [s, u, sl, sb, bch, brh] = await Promise.all([
+      const [s, u, sl, sb, bch, brh, inv] = await Promise.all([
         loadList("shops", []),
         loadList("users", []),
         loadList("sales", []),
         loadList("solo_businesses", []),
         loadList("boss_code_hash", null),
         loadList("boss_recovery_hash", null),
+        loadList("inventory", []),
       ]);
       setShops(s);
       setUsers(u);
@@ -108,6 +116,7 @@ export default function RetailTrackerApp() {
       setSoloBiz(sb);
       setBossCodeHash(bch);
       setBossRecoveryHash(brh);
+      setInventory(inv);
       setLoading(false);
     })();
   }, []);
@@ -161,11 +170,32 @@ export default function RetailTrackerApp() {
         <SoloDashboard
           business={currentUser}
           sales={sales}
+          inventory={inventory.filter((it) => it.kind === "solo" && it.ownerId === currentUser.id)}
           onLogout={goHome}
           onAddSale={async (sale) => {
-            const next = [...sales, sale];
-            setSales(next);
-            await saveList("sales", next);
+            const nextSales = [...sales, sale];
+            setSales(nextSales);
+            await saveList("sales", nextSales);
+            if (sale.inventoryItemId) {
+              const nextInv = applySaleToInventory(sale, inventory);
+              setInventory(nextInv);
+              await saveList("inventory", nextInv);
+            }
+          }}
+          onAddItem={async (item) => {
+            const next = [...inventory, item];
+            setInventory(next);
+            await saveList("inventory", next);
+          }}
+          onUpdateItem={async (itemId, patch) => {
+            const next = inventory.map((it) => (it.id === itemId ? { ...it, ...patch } : it));
+            setInventory(next);
+            await saveList("inventory", next);
+          }}
+          onRemoveItem={async (itemId) => {
+            const next = inventory.filter((it) => it.id !== itemId);
+            setInventory(next);
+            await saveList("inventory", next);
           }}
         />
       )}
@@ -206,11 +236,32 @@ export default function RetailTrackerApp() {
           user={currentUser}
           shop={shops.find((s) => s.id === activeShopId)}
           sales={sales}
+          inventory={inventory.filter((it) => it.kind === "team" && it.ownerId === activeShopId)}
           onLogout={goHome}
           onAddSale={async (sale) => {
-            const next = [...sales, sale];
-            setSales(next);
-            await saveList("sales", next);
+            const nextSales = [...sales, sale];
+            setSales(nextSales);
+            await saveList("sales", nextSales);
+            if (sale.inventoryItemId) {
+              const nextInv = applySaleToInventory(sale, inventory);
+              setInventory(nextInv);
+              await saveList("inventory", nextInv);
+            }
+          }}
+          onAddItem={async (item) => {
+            const next = [...inventory, item];
+            setInventory(next);
+            await saveList("inventory", next);
+          }}
+          onUpdateItem={async (itemId, patch) => {
+            const next = inventory.map((it) => (it.id === itemId ? { ...it, ...patch } : it));
+            setInventory(next);
+            await saveList("inventory", next);
+          }}
+          onRemoveItem={async (itemId) => {
+            const next = inventory.filter((it) => it.id !== itemId);
+            setInventory(next);
+            await saveList("inventory", next);
           }}
         />
       )}
@@ -243,6 +294,7 @@ export default function RetailTrackerApp() {
           shops={shops}
           users={users}
           sales={sales}
+          inventory={inventory}
           onLogout={goHome}
           onUpdateShopCode={async (shopId, code) => {
             const hash = await hashSecret(code);
@@ -271,6 +323,21 @@ export default function RetailTrackerApp() {
             const next = users.map((u) => (u.id === userId ? { ...u, pinHash } : u));
             setUsers(next);
             await saveList("users", next);
+          }}
+          onAddItem={async (item) => {
+            const next = [...inventory, item];
+            setInventory(next);
+            await saveList("inventory", next);
+          }}
+          onUpdateItem={async (itemId, patch) => {
+            const next = inventory.map((it) => (it.id === itemId ? { ...it, ...patch } : it));
+            setInventory(next);
+            await saveList("inventory", next);
+          }}
+          onRemoveItem={async (itemId) => {
+            const next = inventory.filter((it) => it.id !== itemId);
+            setInventory(next);
+            await saveList("inventory", next);
           }}
         />
       )}
@@ -442,16 +509,26 @@ function SoloLogin({ soloBiz, onBack, onSuccess, onCreate, onResetPin }) {
   );
 }
 
-function SoloDashboard({ business, sales, onLogout, onAddSale }) {
+function SoloDashboard({ business, sales, inventory, onLogout, onAddSale, onAddItem, onUpdateItem, onRemoveItem }) {
   const mySales = useMemo(
     () => sales.filter((s) => s.kind === "solo" && s.businessId === business.id).sort((a, b) => (a.date < b.date ? 1 : -1)),
     [sales, business.id]
   );
-  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), product: "", category: "", qty: "", unitPrice: "", cost: "", paymentMethod: "Cash" });
+  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "", paymentMethod: "Cash" });
 
   const totalToday = mySales.filter((s) => s.date === form.date).reduce((a, s) => a + s.total, 0);
   const totalAll = mySales.reduce((a, s) => a + s.total, 0);
   const profitAll = mySales.reduce((a, s) => a + s.profit, 0);
+
+  function pickInventoryItem(itemId) {
+    if (itemId === "__custom__") {
+      setForm((f) => ({ ...f, itemId: "", product: "", unitPrice: "", cost: "" }));
+      return;
+    }
+    const it = inventory.find((x) => x.id === itemId);
+    if (!it) return;
+    setForm((f) => ({ ...f, itemId, product: it.name, unitPrice: String(it.price || ""), cost: String(it.cost || "") }));
+  }
 
   function submit(e) {
     e.preventDefault();
@@ -465,8 +542,9 @@ function SoloDashboard({ business, sales, onLogout, onAddSale }) {
       id: uid(), kind: "solo", businessId: business.id, workerId: business.id, workerName: business.name,
       date: form.date, product: form.product, category: form.category || "General",
       qty, unitPrice, cost, paymentMethod: form.paymentMethod, total, profit,
+      inventoryItemId: form.itemId || null,
     });
-    setForm((f) => ({ ...f, product: "", category: "", qty: "", unitPrice: "", cost: "" }));
+    setForm((f) => ({ ...f, itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "" }));
   }
 
   return (
@@ -480,7 +558,10 @@ function SoloDashboard({ business, sales, onLogout, onAddSale }) {
       </div>
 
       <button
-        onClick={() => exportToExcel(`${business.name}-sales.xlsx`, [{ name: "Sales", rows: mySales.map((s) => saleRow(s)) }])}
+        onClick={() => exportToExcel(`${business.name}-sales.xlsx`, [
+          { name: "Sales", rows: mySales.map((s) => saleRow(s)) },
+          { name: "Inventory", rows: inventory.map((it) => ({ Item: it.name, "In Stock": it.qty, "Cost/unit (₦)": it.cost, "Price/unit (₦)": it.price })) },
+        ])}
         className="mb-4 flex items-center gap-1.5 text-sm font-medium border border-slate-300 rounded-lg px-3 py-1.5 text-slate-700 hover:bg-slate-50"
       >
         <Download className="w-4 h-4" /> Download Excel
@@ -508,7 +589,11 @@ function SoloDashboard({ business, sales, onLogout, onAddSale }) {
           <select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
             <option>Cash</option><option>Transfer</option><option>POS</option>
           </select>
-          <input placeholder="Product / item" value={form.product} onChange={(e) => setForm({ ...form, product: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+          <select value={form.itemId || "__custom__"} onChange={(e) => pickInventoryItem(e.target.value)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2">
+            <option value="__custom__">— Custom item (not tracked in stock) —</option>
+            {inventory.map((it) => <option key={it.id} value={it.id}>{it.name} ({it.qty} in stock)</option>)}
+          </select>
+          <input placeholder="Product / item" value={form.product} onChange={(e) => setForm({ ...form, product: e.target.value, itemId: "" })} disabled={!!form.itemId} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2 disabled:bg-slate-50 disabled:text-slate-500" />
           <input placeholder="Category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
           <input type="number" placeholder="Qty sold" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
           <input type="number" placeholder="Unit price (₦)" value={form.unitPrice} onChange={(e) => setForm({ ...form, unitPrice: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
@@ -516,6 +601,15 @@ function SoloDashboard({ business, sales, onLogout, onAddSale }) {
         </div>
         <button type="submit" className="w-full text-white rounded-lg py-2 text-sm font-medium mt-1" style={{ background: NAVY }}>Add Sale</button>
       </form>
+
+      <InventoryManager
+        items={inventory}
+        onAddItem={onAddItem}
+        onUpdateItem={onUpdateItem}
+        onRemoveItem={onRemoveItem}
+        accent={NAVY}
+        makeItem={(data) => ({ id: uid(), kind: "solo", ownerId: business.id, ...data })}
+      />
 
       <p className="text-sm font-semibold text-slate-800 mb-2">Sales history</p>
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -790,13 +884,23 @@ function WorkerLogin({ shop, users, onBack, onSuccess, onCreateUser }) {
 }
 
 // ============================================================== WORKER DASHBOARD
-function WorkerDashboard({ user, shop, sales, onLogout, onAddSale }) {
+function WorkerDashboard({ user, shop, sales, inventory, onLogout, onAddSale, onAddItem, onUpdateItem, onRemoveItem }) {
   const mySales = useMemo(
     () => sales.filter((s) => s.kind === "team" && s.workerId === user.id).sort((a, b) => (a.date < b.date ? 1 : -1)),
     [sales, user.id]
   );
-  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), product: "", category: "", qty: "", unitPrice: "", cost: "", paymentMethod: "Cash" });
+  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "", paymentMethod: "Cash" });
   const totalToday = mySales.filter((s) => s.date === form.date).reduce((a, s) => a + s.total, 0);
+
+  function pickInventoryItem(itemId) {
+    if (itemId === "__custom__") {
+      setForm((f) => ({ ...f, itemId: "", product: "", unitPrice: "", cost: "" }));
+      return;
+    }
+    const it = inventory.find((x) => x.id === itemId);
+    if (!it) return;
+    setForm((f) => ({ ...f, itemId, product: it.name, unitPrice: String(it.price || ""), cost: String(it.cost || "") }));
+  }
 
   function submit(e) {
     e.preventDefault();
@@ -810,8 +914,9 @@ function WorkerDashboard({ user, shop, sales, onLogout, onAddSale }) {
       id: uid(), kind: "team", shopId: shop.id, workerId: user.id, workerName: user.name,
       date: form.date, product: form.product, category: form.category || "General",
       qty, unitPrice, cost, paymentMethod: form.paymentMethod, total, profit,
+      inventoryItemId: form.itemId || null,
     });
-    setForm((f) => ({ ...f, product: "", category: "", qty: "", unitPrice: "", cost: "" }));
+    setForm((f) => ({ ...f, itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "" }));
   }
 
   return (
@@ -825,7 +930,10 @@ function WorkerDashboard({ user, shop, sales, onLogout, onAddSale }) {
       </div>
 
       <button
-        onClick={() => exportToExcel(`${user.name}-sales.xlsx`, [{ name: "My Sales", rows: mySales.map((s) => saleRow(s)) }])}
+        onClick={() => exportToExcel(`${user.name}-sales.xlsx`, [
+          { name: "My Sales", rows: mySales.map((s) => saleRow(s)) },
+          { name: "Shop Inventory", rows: inventory.map((it) => ({ Item: it.name, "In Stock": it.qty, "Cost/unit (₦)": it.cost, "Price/unit (₦)": it.price })) },
+        ])}
         className="mb-4 flex items-center gap-1.5 text-sm font-medium border border-slate-300 rounded-lg px-3 py-1.5 text-slate-700 hover:bg-slate-50"
       >
         <Download className="w-4 h-4" /> Download Excel
@@ -849,7 +957,11 @@ function WorkerDashboard({ user, shop, sales, onLogout, onAddSale }) {
           <select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
             <option>Cash</option><option>Transfer</option><option>POS</option>
           </select>
-          <input placeholder="Product / item" value={form.product} onChange={(e) => setForm({ ...form, product: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+          <select value={form.itemId || "__custom__"} onChange={(e) => pickInventoryItem(e.target.value)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2">
+            <option value="__custom__">— Custom item (not tracked in stock) —</option>
+            {inventory.map((it) => <option key={it.id} value={it.id}>{it.name} ({it.qty} in stock)</option>)}
+          </select>
+          <input placeholder="Product / item" value={form.product} onChange={(e) => setForm({ ...form, product: e.target.value, itemId: "" })} disabled={!!form.itemId} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2 disabled:bg-slate-50 disabled:text-slate-500" />
           <input placeholder="Category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
           <input type="number" placeholder="Qty sold" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
           <input type="number" placeholder="Unit price (₦)" value={form.unitPrice} onChange={(e) => setForm({ ...form, unitPrice: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
@@ -857,6 +969,15 @@ function WorkerDashboard({ user, shop, sales, onLogout, onAddSale }) {
         </div>
         <button type="submit" className="w-full text-white rounded-lg py-2 text-sm font-medium mt-1" style={{ background: ORANGE }}>Add Sale</button>
       </form>
+
+      <InventoryManager
+        items={inventory}
+        onAddItem={onAddItem}
+        onUpdateItem={onUpdateItem}
+        onRemoveItem={onRemoveItem}
+        accent={ORANGE}
+        makeItem={(data) => ({ id: uid(), kind: "team", ownerId: shop.id, ...data })}
+      />
 
       <p className="text-sm font-semibold text-slate-800 mb-2">My sales history</p>
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -881,8 +1002,91 @@ function WorkerDashboard({ user, shop, sales, onLogout, onAddSale }) {
   );
 }
 
-// ============================================================== BOSS DASHBOARD
-function BossDashboard({ shops, users, sales, onLogout, onUpdateShopCode, onAddShop, onRenameShop, onRemoveShop, onResetWorkerPin }) {
+// ============================================================== INVENTORY
+// Shared by SoloDashboard, WorkerDashboard, and (per shop) BossDashboard.
+function InventoryManager({ items, onAddItem, onUpdateItem, onRemoveItem, accent, makeItem }) {
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ name: "", qty: "", cost: "", price: "" });
+  const [editingQty, setEditingQty] = useState(null);
+  const [qtyDraft, setQtyDraft] = useState("");
+
+  function submit() {
+    if (!form.name.trim()) return;
+    const item = makeItem({
+      name: form.name.trim(),
+      qty: Number(form.qty) || 0,
+      cost: Number(form.cost) || 0,
+      price: Number(form.price) || 0,
+    });
+    onAddItem(item);
+    setForm({ name: "", qty: "", cost: "", price: "" });
+    setAdding(false);
+  }
+
+  return (
+    <div className="mb-6">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-sm font-semibold text-slate-800">Inventory</p>
+        {!adding && (
+          <button onClick={() => setAdding(true)} className="flex items-center gap-1 text-xs font-medium text-white rounded-lg px-2.5 py-1" style={{ background: accent }}>
+            <Plus className="w-3.5 h-3.5" /> Add Item
+          </button>
+        )}
+      </div>
+      {adding && (
+        <div className="bg-white border border-slate-200 rounded-xl p-3 mb-3 grid grid-cols-2 gap-2">
+          <input autoFocus placeholder="Item name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+          <input type="number" placeholder="Starting stock (qty)" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
+          <input type="number" placeholder="Cost/unit (₦)" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
+          <input type="number" placeholder="Selling price/unit (₦)" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+          <div className="col-span-2 flex gap-2">
+            <button onClick={submit} className="flex-1 text-white rounded-lg py-1.5 text-sm font-medium" style={{ background: accent }}>Save Item</button>
+            <button onClick={() => setAdding(false)} className="px-3 text-sm text-slate-500">Cancel</button>
+          </div>
+        </div>
+      )}
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        {items.length === 0 && !adding && (
+          <p className="text-center text-sm text-slate-400 py-6">No items yet — click "Add Item" to start tracking stock.</p>
+        )}
+        {items.length > 0 && (
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-500 text-xs">
+              <tr><th className="text-left px-3 py-2">Item</th><th className="text-right px-3 py-2">In Stock</th><th className="text-right px-3 py-2">Price</th><th className="px-3 py-2"></th></tr>
+            </thead>
+            <tbody>
+              {items.map((it) => (
+                <tr key={it.id} className="border-t border-slate-100">
+                  <td className="px-3 py-2">{it.name}</td>
+                  <td className="px-3 py-2 text-right">
+                    {editingQty === it.id ? (
+                      <span className="inline-flex gap-1 items-center">
+                        <input type="number" value={qtyDraft} onChange={(e) => setQtyDraft(e.target.value)} className="w-16 border border-slate-300 rounded px-1 py-0.5 text-xs text-right" autoFocus />
+                        <button onClick={() => { onUpdateItem(it.id, { qty: Number(qtyDraft) || 0 }); setEditingQty(null); }} className="text-xs px-1.5 py-0.5 rounded text-white" style={{ background: accent }}>Save</button>
+                      </span>
+                    ) : (
+                      <button onClick={() => { setEditingQty(it.id); setQtyDraft(String(it.qty)); }} className={`font-medium hover:underline ${it.qty <= 3 ? "text-red-600" : "text-slate-800"}`}>
+                        {it.qty}{it.qty <= 3 ? " ⚠" : ""}
+                      </button>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-right text-slate-500">{naira(it.price)}</td>
+                  <td className="px-3 py-2 text-right">
+                    <button onClick={() => { if (window.confirm(`Remove "${it.name}" from inventory?`)) onRemoveItem(it.id); }} className="text-xs text-red-400 hover:text-red-600">Remove</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function BossDashboard({ shops, users, sales, inventory, onLogout, onUpdateShopCode, onAddShop, onRenameShop, onRemoveShop, onResetWorkerPin, onAddItem, onUpdateItem, onRemoveItem }) {
+  const [viewingStockFor, setViewingStockFor] = useState(null);
   const [shopFilter, setShopFilter] = useState("all");
   const [workerFilter, setWorkerFilter] = useState("all");
   const [editingCode, setEditingCode] = useState(null);
@@ -952,6 +1156,7 @@ function BossDashboard({ shops, users, sales, onLogout, onUpdateShopCode, onAddS
           exportToExcel("boss-dashboard.xlsx", [
             { name: "Summary by Shop", rows: summaryRows },
             { name: "Sales (filtered)", rows: filtered.map((s) => saleRow(s, { shop: true, worker: true, shopName: shopName(s.shopId) })) },
+            { name: "Inventory (all shops)", rows: inventory.filter((it) => it.kind === "team").map((it) => ({ Shop: shopName(it.ownerId), Item: it.name, "In Stock": it.qty, "Cost/unit (₦)": it.cost, "Price/unit (₦)": it.price })) },
           ]);
         }}
         className="mb-4 flex items-center gap-1.5 text-sm font-medium border border-slate-300 rounded-lg px-3 py-1.5 text-slate-700 hover:bg-slate-50"
@@ -1048,6 +1253,21 @@ function BossDashboard({ shops, users, sales, onLogout, onUpdateShopCode, onAddS
                   >
                     Remove
                   </button>
+                </div>
+              )}
+              <button onClick={() => setViewingStockFor(viewingStockFor === s.id ? null : s.id)} className="text-[11px] text-slate-400 hover:text-slate-700 mt-2 block">
+                {viewingStockFor === s.id ? "Hide stock ▲" : "Manage stock ▼"}
+              </button>
+              {viewingStockFor === s.id && (
+                <div className="mt-3 -mx-1">
+                  <InventoryManager
+                    items={inventory.filter((it) => it.kind === "team" && it.ownerId === s.id)}
+                    onAddItem={onAddItem}
+                    onUpdateItem={onUpdateItem}
+                    onRemoveItem={onRemoveItem}
+                    accent={NAVY}
+                    makeItem={(data) => ({ id: uid(), kind: "team", ownerId: s.id, ...data })}
+                  />
                 </div>
               )}
             </div>
