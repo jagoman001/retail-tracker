@@ -3,8 +3,14 @@ import { Store, User, LogOut, Plus, TrendingUp, Package, ShieldCheck, ArrowLeft,
 import * as XLSX from "xlsx";
 import { databases, DATABASE_ID, TABLE_ID } from "./appwriteClient";
 
-const NAVY = "#0B3D56";
-const ORANGE = "#C0501E";
+// Ledger-inspired palette: deep ink (not generic corporate navy), a muted
+// rust (not the terracotta every AI dashboard reaches for), warm naira-gold
+// for emphasis, and a stamped-ink green for "paid"/positive states.
+const NAVY = "#1B2A3A";    // ink — sidebar, primary text, primary actions
+const ORANGE = "#9C3B2E";  // rust — secondary accent, worker-mode actions
+const GOLD = "#B8863B";    // naira-gold — active nav marker, highlights
+const GREEN = "#2F6E4F";   // ledger green — paid / positive figures
+const PAPER = "#F6F1E7";   // warm paper background
 
 function naira(n) {
   return "₦" + Number(n || 0).toLocaleString("en-NG", { maximumFractionDigits: 0 });
@@ -683,6 +689,85 @@ function SoloLogin({ soloBiz, onBack, onSuccess, onCreate, onResetPin }) {
   );
 }
 
+// A shared shell: ink-navy sidebar with gold active-marker on desktop,
+// collapsing to a top bar + horizontally scrollable tab strip on mobile.
+function DashboardShell({ eyebrow, title, onLogout, tabs, active, onChange, actions, children }) {
+  return (
+    <div className="min-h-screen flex flex-col sm:flex-row" style={{ background: PAPER }}>
+      <aside className="hidden sm:flex sm:flex-col w-56 shrink-0 text-white" style={{ background: NAVY }}>
+        <div className="px-5 py-6">
+          <p className="font-display text-lg font-semibold tracking-tight">Ledger</p>
+          <p className="text-xs text-white/50 mt-0.5">{eyebrow}</p>
+        </div>
+        <nav className="flex-1 px-3 space-y-1">
+          {tabs.map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => onChange(key)}
+              className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-left transition-colors ${active === key ? "bg-white/10 font-medium" : "text-white/60 hover:text-white/90 hover:bg-white/5"}`}
+            >
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: active === key ? GOLD : "transparent" }} />
+              {label}
+            </button>
+          ))}
+        </nav>
+        <div className="px-5 py-4 border-t border-white/10">
+          <button onClick={onLogout} className="flex items-center gap-1.5 text-xs text-white/60 hover:text-white">
+            <LogOut className="w-3.5 h-3.5" /> Log out
+          </button>
+        </div>
+      </aside>
+
+      <div className="sm:hidden text-white" style={{ background: NAVY }}>
+        <div className="flex items-center justify-between px-4 py-3">
+          <div>
+            <p className="font-display font-semibold">Ledger</p>
+            <p className="text-[11px] text-white/50">{eyebrow}</p>
+          </div>
+          <button onClick={onLogout} className="text-xs text-white/60 flex items-center gap-1"><LogOut className="w-3.5 h-3.5" /> Log out</button>
+        </div>
+        <div className="flex gap-1 overflow-x-auto px-3 pb-2">
+          {tabs.map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => onChange(key)}
+              className={`px-3 py-1.5 rounded-full text-xs whitespace-nowrap ${active === key ? "font-medium" : "text-white/50"}`}
+              style={active === key ? { background: "rgba(255,255,255,0.15)", color: GOLD } : {}}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <main className="flex-1 min-w-0">
+        <div className="max-w-4xl mx-auto px-5 py-6">
+          <div className="flex items-center justify-between mb-6 gap-3 flex-wrap">
+            <h1 className="font-display text-xl font-semibold" style={{ color: NAVY }}>{title}</h1>
+            {actions}
+          </div>
+          {children}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+// The signature element: a rotated, dashed-border ink-stamp — evoking the
+// rubber stamp on a physical receipt — used for status states (Paid/Overdue/Pending).
+function StampBadge({ label, tone }) {
+  const colors = { green: GREEN, rust: ORANGE, gold: GOLD };
+  const c = colors[tone] || GREEN;
+  return (
+    <span
+      className="inline-block px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider border-2 border-dashed rounded-full -rotate-3"
+      style={{ borderColor: c, color: c }}
+    >
+      {label}
+    </span>
+  );
+}
+
 function SoloDashboard({ business, sales, inventory, expenses, receivables, onLogout, onAddSale, onAddItem, onUpdateItem, onRemoveItem, onAddExpense, onRemoveExpense, onRecordPayment }) {
   const mySales = useMemo(
     () => sales.filter((s) => s.kind === "solo" && s.businessId === business.id).sort((a, b) => (a.date < b.date ? 1 : -1)),
@@ -727,126 +812,140 @@ function SoloDashboard({ business, sales, inventory, expenses, receivables, onLo
     setForm((f) => ({ ...f, itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "", customerName: "", amountPaidNow: "", dueDate: "" }));
   }
 
+  const [tab, setTab] = useState("overview");
+
   return (
-    <div className="max-w-3xl mx-auto px-5 py-6">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <p className="text-xs text-slate-400">Solo shop</p>
-          <h1 className="text-lg font-bold text-slate-900">{business.name}</h1>
-        </div>
-        <button onClick={onLogout} className="flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800"><LogOut className="w-4 h-4" /> Log out</button>
-      </div>
+    <DashboardShell
+      eyebrow="Solo shop"
+      title={business.name}
+      onLogout={onLogout}
+      tabs={[["overview", "Overview"], ["inventory", "Inventory"], ["expenses", "Expenses"], ["receivables", "Receivables"], ["reports", "Reports"]]}
+      active={tab}
+      onChange={setTab}
+      actions={
+        <button
+          onClick={() => exportToExcel(`${business.name}-sales.xlsx`, [
+            { name: "Sales", rows: mySales.map((s) => saleRow(s)) },
+            { name: "Inventory", rows: inventory.map((it) => ({ Item: it.name, "In Stock": it.qty, "Cost/unit (₦)": it.cost, "Price/unit (₦)": it.price })) },
+            { name: "Expenses", rows: expenses.map((e) => ({ Date: e.date, Description: e.description, Category: e.category, "Amount (₦)": e.amount, "Paid By": e.paidBy, "Receipt #": e.receiptNo, Notes: e.notes })) },
+            { name: "Receivables", rows: receivables.map((r) => ({ Date: r.date, Customer: r.customerName, Item: r.item, "Invoice Amt (₦)": r.invoiceAmt, "Amount Paid (₦)": r.amountPaid, "Balance (₦)": r.invoiceAmt - r.amountPaid, Status: receivableStatus(r) })) },
+          ])}
+          className="flex items-center gap-1.5 text-sm font-medium border border-slate-300 rounded-lg px-3 py-1.5 text-slate-700 hover:bg-white bg-white/60"
+        >
+          <Download className="w-4 h-4" /> Download Excel
+        </button>
+      }
+    >
+      {tab === "overview" && (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400">Today</p>
+              <p className="text-lg font-semibold figure text-slate-900">{naira(totalToday)}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400">Total Revenue</p>
+              <p className="text-lg font-semibold figure" style={{ color: NAVY }}>{naira(totalAll)}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400">Total Expenses</p>
+              <p className="text-lg font-semibold figure text-red-600">{naira(expenseTotal)}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400">Net Profit</p>
+              <p className="text-lg font-semibold figure" style={{ color: ORANGE }}>{naira(netProfit)}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400">Stock Value</p>
+              <p className="text-lg font-semibold figure text-slate-900">{naira(stockValue)}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400">Outstanding Receivables</p>
+              <p className="text-lg font-semibold figure" style={{ color: GOLD }}>{naira(outstandingReceivables)}</p>
+            </div>
+          </div>
 
-      <button
-        onClick={() => exportToExcel(`${business.name}-sales.xlsx`, [
-          { name: "Sales", rows: mySales.map((s) => saleRow(s)) },
-          { name: "Inventory", rows: inventory.map((it) => ({ Item: it.name, "In Stock": it.qty, "Cost/unit (₦)": it.cost, "Price/unit (₦)": it.price })) },
-          { name: "Expenses", rows: expenses.map((e) => ({ Date: e.date, Description: e.description, Category: e.category, "Amount (₦)": e.amount, "Paid By": e.paidBy, "Receipt #": e.receiptNo, Notes: e.notes })) },
-          { name: "Receivables", rows: receivables.map((r) => ({ Date: r.date, Customer: r.customerName, Item: r.item, "Invoice Amt (₦)": r.invoiceAmt, "Amount Paid (₦)": r.amountPaid, "Balance (₦)": r.invoiceAmt - r.amountPaid, Status: receivableStatus(r) })) },
-        ])}
-        className="mb-4 flex items-center gap-1.5 text-sm font-medium border border-slate-300 rounded-lg px-3 py-1.5 text-slate-700 hover:bg-slate-50"
-      >
-        <Download className="w-4 h-4" /> Download Excel
-      </button>
-
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">Today</p>
-          <p className="text-lg font-bold text-slate-900">{naira(totalToday)}</p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">Total Revenue</p>
-          <p className="text-lg font-bold" style={{ color: NAVY }}>{naira(totalAll)}</p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">Total Expenses</p>
-          <p className="text-lg font-bold text-red-600">{naira(expenseTotal)}</p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">Net Profit</p>
-          <p className="text-lg font-bold" style={{ color: ORANGE }}>{naira(netProfit)}</p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">Stock Value</p>
-          <p className="text-lg font-bold text-slate-900">{naira(stockValue)}</p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">Outstanding Receivables</p>
-          <p className="text-lg font-bold text-amber-600">{naira(outstandingReceivables)}</p>
-        </div>
-      </div>
-
-      <form onSubmit={submit} className="bg-white border border-slate-200 rounded-xl p-4 mb-6">
-        <p className="text-sm font-semibold text-slate-800 mb-3 flex items-center gap-1"><Plus className="w-4 h-4" /> Log a sale</p>
-        <div className="grid grid-cols-2 gap-2 mb-2">
-          <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2 sm:col-span-1" />
-          <select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
-            <option>Cash</option><option>Transfer</option><option>POS</option><option>Credit</option><option>Part Payment</option>
-          </select>
-          <input placeholder="Customer name (optional)" value={form.customerName} onChange={(e) => setForm({ ...form, customerName: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
-          <select value={form.itemId || "__custom__"} onChange={(e) => pickInventoryItem(e.target.value)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2">
-            <option value="__custom__">— Custom item (not tracked in stock) —</option>
-            {inventory.map((it) => <option key={it.id} value={it.id}>{it.name} ({it.qty} in stock)</option>)}
-          </select>
-          <input placeholder="Product / item" value={form.product} onChange={(e) => setForm({ ...form, product: e.target.value, itemId: "" })} disabled={!!form.itemId} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2 disabled:bg-slate-50 disabled:text-slate-500" />
-          <input placeholder="Category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
-          <input type="number" placeholder="Qty sold" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
-          <input type="number" placeholder="Unit price (₦)" value={form.unitPrice} onChange={(e) => setForm({ ...form, unitPrice: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
-          <input type="number" placeholder="Cost per item (₦)" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
-          {(form.paymentMethod === "Credit" || form.paymentMethod === "Part Payment") && (
-            <>
-              {form.paymentMethod === "Part Payment" && (
-                <input type="number" placeholder="Amount paid now (₦)" value={form.amountPaidNow} onChange={(e) => setForm({ ...form, amountPaidNow: e.target.value })} className="border border-amber-300 rounded-lg px-2 py-1.5 text-sm" />
+          <form onSubmit={submit} className="bg-white border border-slate-200 rounded-xl p-4 mb-6">
+            <p className="text-sm font-semibold text-slate-800 mb-3 flex items-center gap-1"><Plus className="w-4 h-4" /> Log a sale</p>
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2 sm:col-span-1" />
+              <select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
+                <option>Cash</option><option>Transfer</option><option>POS</option><option>Credit</option><option>Part Payment</option>
+              </select>
+              <input placeholder="Customer name (optional)" value={form.customerName} onChange={(e) => setForm({ ...form, customerName: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+              <select value={form.itemId || "__custom__"} onChange={(e) => pickInventoryItem(e.target.value)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2">
+                <option value="__custom__">— Custom item (not tracked in stock) —</option>
+                {inventory.map((it) => <option key={it.id} value={it.id}>{it.name} ({it.qty} in stock)</option>)}
+              </select>
+              <input placeholder="Product / item" value={form.product} onChange={(e) => setForm({ ...form, product: e.target.value, itemId: "" })} disabled={!!form.itemId} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2 disabled:bg-slate-50 disabled:text-slate-500" />
+              <input placeholder="Category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+              <input type="number" placeholder="Qty sold" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
+              <input type="number" placeholder="Unit price (₦)" value={form.unitPrice} onChange={(e) => setForm({ ...form, unitPrice: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
+              <input type="number" placeholder="Cost per item (₦)" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+              {(form.paymentMethod === "Credit" || form.paymentMethod === "Part Payment") && (
+                <>
+                  {form.paymentMethod === "Part Payment" && (
+                    <input type="number" placeholder="Amount paid now (₦)" value={form.amountPaidNow} onChange={(e) => setForm({ ...form, amountPaidNow: e.target.value })} className="border border-amber-300 rounded-lg px-2 py-1.5 text-sm" />
+                  )}
+                  <input type="date" placeholder="Due date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} className={`border border-amber-300 rounded-lg px-2 py-1.5 text-sm ${form.paymentMethod === "Credit" ? "col-span-2" : ""}`} />
+                </>
               )}
-              <input type="date" placeholder="Due date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} className={`border border-amber-300 rounded-lg px-2 py-1.5 text-sm ${form.paymentMethod === "Credit" ? "col-span-2" : ""}`} />
-            </>
-          )}
-        </div>
-        <button type="submit" className="w-full text-white rounded-lg py-2 text-sm font-medium mt-1" style={{ background: NAVY }}>Add Sale</button>
-      </form>
+            </div>
+            <button type="submit" className="w-full text-white rounded-lg py-2 text-sm font-medium mt-1" style={{ background: NAVY }}>Add Sale</button>
+          </form>
 
-      <ExpenseManager
-        expenses={expenses}
-        onAddExpense={onAddExpense}
-        onRemoveExpense={onRemoveExpense}
-        accent={NAVY}
-        makeExpense={(data) => ({ id: uid(), kind: "solo", ownerId: business.id, ...data })}
-      />
+          <p className="text-sm font-semibold text-slate-800 mb-2">Sales history</p>
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-500 text-xs">
+                <tr><th className="text-left px-3 py-2">Date</th><th className="text-left px-3 py-2">Item</th><th className="text-right px-3 py-2">Qty</th><th className="text-right px-3 py-2">Total</th><th className="px-3 py-2"></th></tr>
+              </thead>
+              <tbody>
+                {mySales.length === 0 && <tr><td colSpan={5} className="text-center text-slate-400 py-6">No sales logged yet.</td></tr>}
+                {mySales.map((s) => (
+                  <tr key={s.id} className="border-t border-slate-100">
+                    <td className="px-3 py-2">{s.date}</td>
+                    <td className="px-3 py-2">{s.product}</td>
+                    <td className="px-3 py-2 text-right">{s.qty}</td>
+                    <td className="px-3 py-2 text-right font-medium">{naira(s.total)}</td>
+                    <td className="px-3 py-2 text-right"><button onClick={() => openInvoice(s, business.name)} className="text-xs text-slate-400 hover:text-slate-700">Invoice</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
 
-      <ReceivablesManager receivables={receivables} onRecordPayment={onRecordPayment} accent={NAVY} />
+      {tab === "inventory" && (
+        <InventoryManager
+          items={inventory}
+          onAddItem={onAddItem}
+          onUpdateItem={onUpdateItem}
+          onRemoveItem={onRemoveItem}
+          accent={NAVY}
+          makeItem={(data) => ({ id: uid(), kind: "solo", ownerId: business.id, ...data })}
+        />
+      )}
 
-      <FinancialsView salesRows={mySales} expenseRows={expenses} receivableRows={receivables} accent={NAVY} />
+      {tab === "expenses" && (
+        <ExpenseManager
+          expenses={expenses}
+          onAddExpense={onAddExpense}
+          onRemoveExpense={onRemoveExpense}
+          accent={NAVY}
+          makeExpense={(data) => ({ id: uid(), kind: "solo", ownerId: business.id, ...data })}
+        />
+      )}
 
-      <InventoryManager
-        items={inventory}
-        onAddItem={onAddItem}
-        onUpdateItem={onUpdateItem}
-        onRemoveItem={onRemoveItem}
-        accent={NAVY}
-        makeItem={(data) => ({ id: uid(), kind: "solo", ownerId: business.id, ...data })}
-      />
+      {tab === "receivables" && (
+        <ReceivablesManager receivables={receivables} onRecordPayment={onRecordPayment} accent={NAVY} />
+      )}
 
-      <p className="text-sm font-semibold text-slate-800 mb-2">Sales history</p>
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-500 text-xs">
-            <tr><th className="text-left px-3 py-2">Date</th><th className="text-left px-3 py-2">Item</th><th className="text-right px-3 py-2">Qty</th><th className="text-right px-3 py-2">Total</th><th className="px-3 py-2"></th></tr>
-          </thead>
-          <tbody>
-            {mySales.length === 0 && <tr><td colSpan={5} className="text-center text-slate-400 py-6">No sales logged yet.</td></tr>}
-            {mySales.map((s) => (
-              <tr key={s.id} className="border-t border-slate-100">
-                <td className="px-3 py-2">{s.date}</td>
-                <td className="px-3 py-2">{s.product}</td>
-                <td className="px-3 py-2 text-right">{s.qty}</td>
-                <td className="px-3 py-2 text-right font-medium">{naira(s.total)}</td>
-                <td className="px-3 py-2 text-right"><button onClick={() => openInvoice(s, business.name)} className="text-xs text-slate-400 hover:text-slate-700">Invoice</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
+      {tab === "reports" && (
+        <FinancialsView salesRows={mySales} expenseRows={expenses} receivableRows={receivables} accent={NAVY} />
+      )}
+    </DashboardShell>
   );
 }
 
@@ -1137,108 +1236,120 @@ function WorkerDashboard({ user, shop, sales, inventory, expenses, receivables, 
     setForm((f) => ({ ...f, itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "", customerName: "", amountPaidNow: "", dueDate: "" }));
   }
 
+  const [tab, setTab] = useState("overview");
+
   return (
-    <div className="max-w-3xl mx-auto px-5 py-6">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <p className="text-xs text-slate-400">{shop?.name}</p>
-          <h1 className="text-lg font-bold text-slate-900">Hi, {user.name}</h1>
-        </div>
-        <button onClick={onLogout} className="flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800"><LogOut className="w-4 h-4" /> Log out</button>
-      </div>
+    <DashboardShell
+      eyebrow={shop?.name || "Shop"}
+      title={`Hi, ${user.name}`}
+      onLogout={onLogout}
+      tabs={[["overview", "Overview"], ["inventory", "Inventory"], ["expenses", "Expenses"], ["receivables", "Receivables"]]}
+      active={tab}
+      onChange={setTab}
+      actions={
+        <button
+          onClick={() => exportToExcel(`${user.name}-sales.xlsx`, [
+            { name: "My Sales", rows: mySales.map((s) => saleRow(s)) },
+            { name: "Shop Inventory", rows: inventory.map((it) => ({ Item: it.name, "In Stock": it.qty, "Cost/unit (₦)": it.cost, "Price/unit (₦)": it.price })) },
+            { name: "Shop Expenses", rows: expenses.map((e) => ({ Date: e.date, Description: e.description, Category: e.category, "Amount (₦)": e.amount, "Paid By": e.paidBy, "Receipt #": e.receiptNo, Notes: e.notes })) },
+            { name: "Shop Receivables", rows: receivables.map((r) => ({ Date: r.date, Customer: r.customerName, Item: r.item, "Invoice Amt (₦)": r.invoiceAmt, "Amount Paid (₦)": r.amountPaid, "Balance (₦)": r.invoiceAmt - r.amountPaid, Status: receivableStatus(r) })) },
+          ])}
+          className="flex items-center gap-1.5 text-sm font-medium border border-slate-300 rounded-lg px-3 py-1.5 text-slate-700 hover:bg-white bg-white/60"
+        >
+          <Download className="w-4 h-4" /> Download Excel
+        </button>
+      }
+    >
+      {tab === "overview" && (
+        <>
+          <div className="grid grid-cols-2 gap-3 mb-6">
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400">My sales today</p>
+              <p className="text-xl font-semibold figure text-slate-900">{naira(totalToday)}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400">My total records</p>
+              <p className="text-xl font-semibold figure text-slate-900">{mySales.length}</p>
+            </div>
+          </div>
 
-      <button
-        onClick={() => exportToExcel(`${user.name}-sales.xlsx`, [
-          { name: "My Sales", rows: mySales.map((s) => saleRow(s)) },
-          { name: "Shop Inventory", rows: inventory.map((it) => ({ Item: it.name, "In Stock": it.qty, "Cost/unit (₦)": it.cost, "Price/unit (₦)": it.price })) },
-          { name: "Shop Expenses", rows: expenses.map((e) => ({ Date: e.date, Description: e.description, Category: e.category, "Amount (₦)": e.amount, "Paid By": e.paidBy, "Receipt #": e.receiptNo, Notes: e.notes })) },
-          { name: "Shop Receivables", rows: receivables.map((r) => ({ Date: r.date, Customer: r.customerName, Item: r.item, "Invoice Amt (₦)": r.invoiceAmt, "Amount Paid (₦)": r.amountPaid, "Balance (₦)": r.invoiceAmt - r.amountPaid, Status: receivableStatus(r) })) },
-        ])}
-        className="mb-4 flex items-center gap-1.5 text-sm font-medium border border-slate-300 rounded-lg px-3 py-1.5 text-slate-700 hover:bg-slate-50"
-      >
-        <Download className="w-4 h-4" /> Download Excel
-      </button>
-
-      <div className="grid grid-cols-2 gap-3 mb-6">
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">My sales today</p>
-          <p className="text-xl font-bold text-slate-900">{naira(totalToday)}</p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">My total records</p>
-          <p className="text-xl font-bold text-slate-900">{mySales.length}</p>
-        </div>
-      </div>
-
-      <form onSubmit={submit} className="bg-white border border-slate-200 rounded-xl p-4 mb-6">
-        <p className="text-sm font-semibold text-slate-800 mb-3 flex items-center gap-1"><Plus className="w-4 h-4" /> Log a sale</p>
-        <div className="grid grid-cols-2 gap-2 mb-2">
-          <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2 sm:col-span-1" />
-          <select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
-            <option>Cash</option><option>Transfer</option><option>POS</option><option>Credit</option><option>Part Payment</option>
-          </select>
-          <input placeholder="Customer name (optional)" value={form.customerName} onChange={(e) => setForm({ ...form, customerName: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
-          <select value={form.itemId || "__custom__"} onChange={(e) => pickInventoryItem(e.target.value)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2">
-            <option value="__custom__">— Custom item (not tracked in stock) —</option>
-            {inventory.map((it) => <option key={it.id} value={it.id}>{it.name} ({it.qty} in stock)</option>)}
-          </select>
-          <input placeholder="Product / item" value={form.product} onChange={(e) => setForm({ ...form, product: e.target.value, itemId: "" })} disabled={!!form.itemId} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2 disabled:bg-slate-50 disabled:text-slate-500" />
-          <input placeholder="Category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
-          <input type="number" placeholder="Qty sold" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
-          <input type="number" placeholder="Unit price (₦)" value={form.unitPrice} onChange={(e) => setForm({ ...form, unitPrice: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
-          <input type="number" placeholder="Cost per item (₦)" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
-          {(form.paymentMethod === "Credit" || form.paymentMethod === "Part Payment") && (
-            <>
-              {form.paymentMethod === "Part Payment" && (
-                <input type="number" placeholder="Amount paid now (₦)" value={form.amountPaidNow} onChange={(e) => setForm({ ...form, amountPaidNow: e.target.value })} className="border border-amber-300 rounded-lg px-2 py-1.5 text-sm" />
+          <form onSubmit={submit} className="bg-white border border-slate-200 rounded-xl p-4 mb-6">
+            <p className="text-sm font-semibold text-slate-800 mb-3 flex items-center gap-1"><Plus className="w-4 h-4" /> Log a sale</p>
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2 sm:col-span-1" />
+              <select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
+                <option>Cash</option><option>Transfer</option><option>POS</option><option>Credit</option><option>Part Payment</option>
+              </select>
+              <input placeholder="Customer name (optional)" value={form.customerName} onChange={(e) => setForm({ ...form, customerName: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+              <select value={form.itemId || "__custom__"} onChange={(e) => pickInventoryItem(e.target.value)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2">
+                <option value="__custom__">— Custom item (not tracked in stock) —</option>
+                {inventory.map((it) => <option key={it.id} value={it.id}>{it.name} ({it.qty} in stock)</option>)}
+              </select>
+              <input placeholder="Product / item" value={form.product} onChange={(e) => setForm({ ...form, product: e.target.value, itemId: "" })} disabled={!!form.itemId} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2 disabled:bg-slate-50 disabled:text-slate-500" />
+              <input placeholder="Category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+              <input type="number" placeholder="Qty sold" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
+              <input type="number" placeholder="Unit price (₦)" value={form.unitPrice} onChange={(e) => setForm({ ...form, unitPrice: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
+              <input type="number" placeholder="Cost per item (₦)" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+              {(form.paymentMethod === "Credit" || form.paymentMethod === "Part Payment") && (
+                <>
+                  {form.paymentMethod === "Part Payment" && (
+                    <input type="number" placeholder="Amount paid now (₦)" value={form.amountPaidNow} onChange={(e) => setForm({ ...form, amountPaidNow: e.target.value })} className="border border-amber-300 rounded-lg px-2 py-1.5 text-sm" />
+                  )}
+                  <input type="date" placeholder="Due date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} className={`border border-amber-300 rounded-lg px-2 py-1.5 text-sm ${form.paymentMethod === "Credit" ? "col-span-2" : ""}`} />
+                </>
               )}
-              <input type="date" placeholder="Due date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} className={`border border-amber-300 rounded-lg px-2 py-1.5 text-sm ${form.paymentMethod === "Credit" ? "col-span-2" : ""}`} />
-            </>
-          )}
-        </div>
-        <button type="submit" className="w-full text-white rounded-lg py-2 text-sm font-medium mt-1" style={{ background: ORANGE }}>Add Sale</button>
-      </form>
+            </div>
+            <button type="submit" className="w-full text-white rounded-lg py-2 text-sm font-medium mt-1" style={{ background: ORANGE }}>Add Sale</button>
+          </form>
 
-      <ExpenseManager
-        expenses={expenses}
-        onAddExpense={onAddExpense}
-        onRemoveExpense={onRemoveExpense}
-        accent={ORANGE}
-        makeExpense={(data) => ({ id: uid(), kind: "team", ownerId: shop.id, ...data, createdBy: user.name })}
-      />
+          <p className="text-sm font-semibold text-slate-800 mb-2">My sales history</p>
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-500 text-xs">
+                <tr><th className="text-left px-3 py-2">Date</th><th className="text-left px-3 py-2">Item</th><th className="text-right px-3 py-2">Qty</th><th className="text-right px-3 py-2">Total</th><th className="px-3 py-2"></th></tr>
+              </thead>
+              <tbody>
+                {mySales.length === 0 && <tr><td colSpan={5} className="text-center text-slate-400 py-6">No sales logged yet.</td></tr>}
+                {mySales.map((s) => (
+                  <tr key={s.id} className="border-t border-slate-100">
+                    <td className="px-3 py-2">{s.date}</td>
+                    <td className="px-3 py-2">{s.product}</td>
+                    <td className="px-3 py-2 text-right">{s.qty}</td>
+                    <td className="px-3 py-2 text-right font-medium">{naira(s.total)}</td>
+                    <td className="px-3 py-2 text-right"><button onClick={() => openInvoice(s, shop?.name || "", null)} className="text-xs text-slate-400 hover:text-slate-700">Invoice</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
 
-      <ReceivablesManager receivables={receivables} onRecordPayment={onRecordPayment} accent={ORANGE} />
+      {tab === "inventory" && (
+        <InventoryManager
+          items={inventory}
+          onAddItem={onAddItem}
+          onUpdateItem={onUpdateItem}
+          onRemoveItem={onRemoveItem}
+          accent={ORANGE}
+          makeItem={(data) => ({ id: uid(), kind: "team", ownerId: shop.id, ...data })}
+        />
+      )}
 
-      <InventoryManager
-        items={inventory}
-        onAddItem={onAddItem}
-        onUpdateItem={onUpdateItem}
-        onRemoveItem={onRemoveItem}
-        accent={ORANGE}
-        makeItem={(data) => ({ id: uid(), kind: "team", ownerId: shop.id, ...data })}
-      />
+      {tab === "expenses" && (
+        <ExpenseManager
+          expenses={expenses}
+          onAddExpense={onAddExpense}
+          onRemoveExpense={onRemoveExpense}
+          accent={ORANGE}
+          makeExpense={(data) => ({ id: uid(), kind: "team", ownerId: shop.id, ...data, createdBy: user.name })}
+        />
+      )}
 
-      <p className="text-sm font-semibold text-slate-800 mb-2">My sales history</p>
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-500 text-xs">
-            <tr><th className="text-left px-3 py-2">Date</th><th className="text-left px-3 py-2">Item</th><th className="text-right px-3 py-2">Qty</th><th className="text-right px-3 py-2">Total</th><th className="px-3 py-2"></th></tr>
-          </thead>
-          <tbody>
-            {mySales.length === 0 && <tr><td colSpan={5} className="text-center text-slate-400 py-6">No sales logged yet.</td></tr>}
-            {mySales.map((s) => (
-              <tr key={s.id} className="border-t border-slate-100">
-                <td className="px-3 py-2">{s.date}</td>
-                <td className="px-3 py-2">{s.product}</td>
-                <td className="px-3 py-2 text-right">{s.qty}</td>
-                <td className="px-3 py-2 text-right font-medium">{naira(s.total)}</td>
-                <td className="px-3 py-2 text-right"><button onClick={() => openInvoice(s, shop?.name || "", null)} className="text-xs text-slate-400 hover:text-slate-700">Invoice</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
+      {tab === "receivables" && (
+        <ReceivablesManager receivables={receivables} onRecordPayment={onRecordPayment} accent={ORANGE} />
+      )}
+    </DashboardShell>
   );
 }
 
@@ -1398,7 +1509,7 @@ function ReceivablesManager({ receivables, onRecordPayment, accent }) {
   const [payingId, setPayingId] = useState(null);
   const [amountDraft, setAmountDraft] = useState("");
   const totalOwed = receivables.reduce((a, r) => a + Math.max(0, r.invoiceAmt - r.amountPaid), 0);
-  const badge = { Paid: "bg-emerald-50 text-emerald-700", Pending: "bg-amber-50 text-amber-700", Overdue: "bg-red-50 text-red-700" };
+  const badgeTone = { Paid: "green", Pending: "gold", Overdue: "rust" };
 
   return (
     <div className="mb-6">
@@ -1420,7 +1531,7 @@ function ReceivablesManager({ receivables, onRecordPayment, accent }) {
                     <td className="px-3 py-2">{r.customerName}</td>
                     <td className="px-3 py-2">{r.item}</td>
                     <td className="px-3 py-2 text-right font-medium">{naira(balance)}</td>
-                    <td className="px-3 py-2 text-center"><span className={`text-[11px] px-2 py-0.5 rounded-full ${badge[status]}`}>{status}</span></td>
+                    <td className="px-3 py-2 text-center"><StampBadge label={status} tone={badgeTone[status]} /></td>
                     <td className="px-3 py-2 text-right">
                       {status !== "Paid" && (
                         payingId === r.id ? (
@@ -1597,41 +1708,43 @@ function BossDashboard({ shops, users, sales, inventory, expenses, receivables, 
     };
   }
 
+  const [tab, setTab] = useState("shops");
+
   return (
-    <div className="max-w-5xl mx-auto px-5 py-6">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <p className="text-xs text-slate-400">All shops</p>
-          <h1 className="text-lg font-bold text-slate-900 flex items-center gap-2"><ShieldCheck className="w-5 h-5" style={{ color: NAVY }} /> Boss Dashboard</h1>
-        </div>
-        <button onClick={onLogout} className="flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800"><LogOut className="w-4 h-4" /> Log out</button>
-      </div>
-
-      <button
-        onClick={() => {
-          const summaryRows = shops.map((s) => {
-            const st = shopStats(s.id);
-            return { Shop: s.name, Workers: st.workers, "Revenue (₦)": st.revenue, "Profit (₦)": st.profit };
-          });
-          exportToExcel("boss-dashboard.xlsx", [
-            { name: "Summary by Shop", rows: summaryRows },
-            { name: "Sales (filtered)", rows: filtered.map((s) => saleRow(s, { shop: true, worker: true, shopName: shopName(s.shopId) })) },
-            { name: "Inventory (all shops)", rows: inventory.filter((it) => it.kind === "team").map((it) => ({ Shop: shopName(it.ownerId), Item: it.name, "In Stock": it.qty, "Cost/unit (₦)": it.cost, "Price/unit (₦)": it.price })) },
-            { name: "Expenses", rows: scopedExpenses.map((e) => ({ Shop: shopName(e.ownerId), Date: e.date, Description: e.description, Category: e.category, "Amount (₦)": e.amount, "Paid By": e.paidBy, "Receipt #": e.receiptNo })) },
-            { name: "Receivables", rows: scopedReceivables.map((r) => ({ Shop: shopName(r.ownerId), Date: r.date, Customer: r.customerName, Item: r.item, "Invoice Amt (₦)": r.invoiceAmt, "Amount Paid (₦)": r.amountPaid, "Balance (₦)": r.invoiceAmt - r.amountPaid, Status: receivableStatus(r) })) },
-          ]);
-        }}
-        className="mb-4 flex items-center gap-1.5 text-sm font-medium border border-slate-300 rounded-lg px-3 py-1.5 text-slate-700 hover:bg-slate-50"
-      >
-        <Download className="w-4 h-4" /> Download Excel
-      </button>
-
+    <DashboardShell
+      eyebrow="All shops"
+      title="Boss Dashboard"
+      onLogout={onLogout}
+      tabs={[["shops", "Shops"], ["workers", "Workers"], ["sales", "Sales"], ["expenses", "Expenses"], ["receivables", "Receivables"], ["reports", "Reports"]]}
+      active={tab}
+      onChange={setTab}
+      actions={
+        <button
+          onClick={() => {
+            const summaryRows = shops.map((s) => {
+              const st = shopStats(s.id);
+              return { Shop: s.name, Workers: st.workers, "Revenue (₦)": st.revenue, "Profit (₦)": st.profit };
+            });
+            exportToExcel("boss-dashboard.xlsx", [
+              { name: "Summary by Shop", rows: summaryRows },
+              { name: "Sales (filtered)", rows: filtered.map((s) => saleRow(s, { shop: true, worker: true, shopName: shopName(s.shopId) })) },
+              { name: "Inventory (all shops)", rows: inventory.filter((it) => it.kind === "team").map((it) => ({ Shop: shopName(it.ownerId), Item: it.name, "In Stock": it.qty, "Cost/unit (₦)": it.cost, "Price/unit (₦)": it.price })) },
+              { name: "Expenses", rows: scopedExpenses.map((e) => ({ Shop: shopName(e.ownerId), Date: e.date, Description: e.description, Category: e.category, "Amount (₦)": e.amount, "Paid By": e.paidBy, "Receipt #": e.receiptNo })) },
+              { name: "Receivables", rows: scopedReceivables.map((r) => ({ Shop: shopName(r.ownerId), Date: r.date, Customer: r.customerName, Item: r.item, "Invoice Amt (₦)": r.invoiceAmt, "Amount Paid (₦)": r.amountPaid, "Balance (₦)": r.invoiceAmt - r.amountPaid, Status: receivableStatus(r) })) },
+            ]);
+          }}
+          className="flex items-center gap-1.5 text-sm font-medium border border-slate-300 rounded-lg px-3 py-1.5 text-slate-700 hover:bg-white bg-white/60"
+        >
+          <Download className="w-4 h-4" /> Download Excel
+        </button>
+      }
+    >
       {revealShopCode && (
         <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 mb-4">
           <p className="text-sm font-semibold text-slate-800 mb-1">"{revealShopCode.name}" created</p>
           <p className="text-xs text-slate-500 mb-2">Give this portal code to that shop's team. It won't be shown again — you can only reset it afterward.</p>
           <div className="flex items-center gap-3">
-            <span className="bg-white border border-emerald-300 rounded-lg px-4 py-1.5 font-mono font-bold text-slate-900">{revealShopCode.code}</span>
+            <span className="bg-white border border-emerald-300 rounded-lg px-4 py-1.5 figure font-semibold text-slate-900">{revealShopCode.code}</span>
             <button onClick={() => setRevealShopCode(null)} className="text-xs text-slate-500 hover:text-slate-800">Dismiss</button>
           </div>
         </div>
@@ -1641,205 +1754,215 @@ function BossDashboard({ shops, users, sales, inventory, expenses, receivables, 
           <p className="text-sm font-semibold text-slate-800 mb-1">{revealWorkerPin.name}'s PIN was reset</p>
           <p className="text-xs text-slate-500 mb-2">Give them this new PIN. It won't be shown again.</p>
           <div className="flex items-center gap-3">
-            <span className="bg-white border border-emerald-300 rounded-lg px-4 py-1.5 font-mono font-bold text-slate-900">{revealWorkerPin.pin}</span>
+            <span className="bg-white border border-emerald-300 rounded-lg px-4 py-1.5 figure font-semibold text-slate-900">{revealWorkerPin.pin}</span>
             <button onClick={() => setRevealWorkerPin(null)} className="text-xs text-slate-500 hover:text-slate-800">Dismiss</button>
           </div>
         </div>
       )}
 
-      {/* Per-shop overview */}
-      <div className="flex items-center justify-between mb-2">
-        <p className="text-sm font-semibold text-slate-800">Overview by shop</p>
-        {!addingShop && (
-          <button onClick={() => setAddingShop(true)} className="flex items-center gap-1 text-xs font-medium text-white rounded-lg px-2.5 py-1" style={{ background: NAVY }}>
-            <Plus className="w-3.5 h-3.5" /> Add Shop
-          </button>
-        )}
-      </div>
-      {addingShop && (
-        <div className="bg-white border border-slate-200 rounded-xl p-4 mb-3 flex gap-2">
-          <input
-            autoFocus
-            placeholder="New shop name (e.g. Main Branch)"
-            value={newShopName}
-            onChange={(e) => setNewShopName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleAddShop()}
-            className="flex-1 border border-slate-300 rounded-lg px-3 py-1.5 text-sm"
-          />
-          <button onClick={handleAddShop} className="text-sm px-3 py-1.5 rounded-lg text-white" style={{ background: NAVY }}>Create</button>
-          <button onClick={() => { setAddingShop(false); setNewShopName(""); }} className="text-sm px-3 py-1.5 rounded-lg text-slate-500">Cancel</button>
-        </div>
-      )}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
-        {shops.length === 0 && !addingShop && (
-          <div className="sm:col-span-3 text-center text-sm text-slate-400 py-6 border border-dashed border-slate-300 rounded-xl">
-            No shops yet — click "Add Shop" to create your first one.
-          </div>
-        )}
-        {shops.map((s) => {
-          const st = shopStats(s.id);
-          return (
-            <div key={s.id} className="bg-white border border-slate-200 rounded-xl p-4">
-              <div className="flex items-center justify-between mb-2">
-                {renamingShop === s.id ? (
-                  <div className="flex gap-1 flex-1">
-                    <input value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} className="border border-slate-300 rounded px-2 py-1 text-xs flex-1" autoFocus />
-                    <button onClick={() => { if (nameDraft.trim()) { onRenameShop(s.id, nameDraft.trim()); setRenamingShop(null); } }} className="text-xs px-2 py-1 rounded text-white" style={{ background: NAVY }}>Save</button>
-                  </div>
-                ) : (
-                  <button onClick={() => { setRenamingShop(s.id); setNameDraft(s.name); }} className="text-sm font-semibold text-slate-800 hover:underline text-left">{s.name}</button>
-                )}
-                <span className="text-[10px] text-slate-400 whitespace-nowrap ml-2">{st.workers} worker{st.workers === 1 ? "" : "s"}</span>
-              </div>
-              <p className="text-lg font-bold" style={{ color: NAVY }}>{naira(st.revenue)}</p>
-              <p className="text-xs text-slate-400 mb-2">Profit: <span style={{ color: ORANGE }}>{naira(st.profit)}</span></p>
-              {editingCode === s.id ? (
-                <div className="flex gap-1 mt-2">
-                  <input value={codeDraft} onChange={(e) => setCodeDraft(e.target.value)} className="border border-slate-300 rounded px-2 py-1 text-xs w-24" placeholder="New portal code" autoFocus />
-                  <button
-                    onClick={() => { if (codeDraft.trim()) { onUpdateShopCode(s.id, codeDraft.trim()); setEditingCode(null); } }}
-                    className="text-xs px-2 py-1 rounded text-white" style={{ background: NAVY }}
-                  >
-                    Save
-                  </button>
-                  <button onClick={() => setEditingCode(null)} className="text-xs px-2 py-1 rounded text-slate-500">Cancel</button>
-                </div>
-              ) : (
-                <div className="flex items-center justify-between">
-                  <button onClick={() => { setEditingCode(s.id); setCodeDraft(""); }} className="text-[11px] text-slate-400 flex items-center gap-1 hover:text-slate-700">
-                    <Lock className="w-3 h-3" /> Portal code set (change)
-                  </button>
-                  <button
-                    onClick={() => { if (window.confirm(`Remove "${s.name}"? Its sales history stays, but workers there won't be able to log in.`)) onRemoveShop(s.id); }}
-                    className="text-[11px] text-red-400 hover:text-red-600"
-                  >
-                    Remove
-                  </button>
-                </div>
-              )}
-              <button onClick={() => setViewingStockFor(viewingStockFor === s.id ? null : s.id)} className="text-[11px] text-slate-400 hover:text-slate-700 mt-2 block">
-                {viewingStockFor === s.id ? "Hide stock ▲" : "Manage stock ▼"}
+      {tab === "shops" && (
+        <>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-sm font-semibold text-slate-800">Overview by shop</p>
+            {!addingShop && (
+              <button onClick={() => setAddingShop(true)} className="flex items-center gap-1 text-xs font-medium text-white rounded-lg px-2.5 py-1" style={{ background: NAVY }}>
+                <Plus className="w-3.5 h-3.5" /> Add Shop
               </button>
-              {viewingStockFor === s.id && (
-                <div className="mt-3 -mx-1">
-                  <InventoryManager
-                    items={inventory.filter((it) => it.kind === "team" && it.ownerId === s.id)}
-                    onAddItem={onAddItem}
-                    onUpdateItem={onUpdateItem}
-                    onRemoveItem={onRemoveItem}
-                    accent={NAVY}
-                    makeItem={(data) => ({ id: uid(), kind: "team", ownerId: s.id, ...data })}
-                  />
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Worker PIN management */}
-      {users.length > 0 && (
-        <div className="mb-6">
-          <p className="text-sm font-semibold text-slate-800 mb-2">Workers</p>
-          <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">
-            {users.map((u) => (
-              <div key={u.id} className="flex items-center justify-between px-4 py-2.5">
-                <div>
-                  <p className="text-sm font-medium text-slate-800">{u.name}</p>
-                  <p className="text-xs text-slate-400">{shopName(u.shopId)}</p>
-                </div>
-                {resettingWorker === u.id ? (
-                  <div className="flex gap-2 items-center">
-                    <span className="text-xs text-slate-500">Reset this worker's PIN?</span>
-                    <button onClick={() => handleResetWorkerPin(u)} className="text-xs px-2 py-1 rounded text-white" style={{ background: ORANGE }}>Confirm</button>
-                    <button onClick={() => setResettingWorker(null)} className="text-xs px-2 py-1 rounded text-slate-500">Cancel</button>
-                  </div>
-                ) : (
-                  <button onClick={() => setResettingWorker(u.id)} className="text-xs text-slate-400 hover:text-slate-700">Reset PIN</button>
-                )}
-              </div>
-            ))}
+            )}
           </div>
+          {addingShop && (
+            <div className="bg-white border border-slate-200 rounded-xl p-4 mb-3 flex gap-2">
+              <input
+                autoFocus
+                placeholder="New shop name (e.g. Main Branch)"
+                value={newShopName}
+                onChange={(e) => setNewShopName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleAddShop()}
+                className="flex-1 border border-slate-300 rounded-lg px-3 py-1.5 text-sm"
+              />
+              <button onClick={handleAddShop} className="text-sm px-3 py-1.5 rounded-lg text-white" style={{ background: NAVY }}>Create</button>
+              <button onClick={() => { setAddingShop(false); setNewShopName(""); }} className="text-sm px-3 py-1.5 rounded-lg text-slate-500">Cancel</button>
+            </div>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+            {shops.length === 0 && !addingShop && (
+              <div className="sm:col-span-3 text-center text-sm text-slate-400 py-6 border border-dashed border-slate-300 rounded-xl">
+                No shops yet — click "Add Shop" to create your first one.
+              </div>
+            )}
+            {shops.map((s) => {
+              const st = shopStats(s.id);
+              return (
+                <div key={s.id} className="bg-white border border-slate-200 rounded-xl p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    {renamingShop === s.id ? (
+                      <div className="flex gap-1 flex-1">
+                        <input value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} className="border border-slate-300 rounded px-2 py-1 text-xs flex-1" autoFocus />
+                        <button onClick={() => { if (nameDraft.trim()) { onRenameShop(s.id, nameDraft.trim()); setRenamingShop(null); } }} className="text-xs px-2 py-1 rounded text-white" style={{ background: NAVY }}>Save</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => { setRenamingShop(s.id); setNameDraft(s.name); }} className="text-sm font-semibold text-slate-800 hover:underline text-left">{s.name}</button>
+                    )}
+                    <span className="text-[10px] text-slate-400 whitespace-nowrap ml-2">{st.workers} worker{st.workers === 1 ? "" : "s"}</span>
+                  </div>
+                  <p className="text-lg font-bold" style={{ color: NAVY }}>{naira(st.revenue)}</p>
+                  <p className="text-xs text-slate-400 mb-2">Profit: <span style={{ color: ORANGE }}>{naira(st.profit)}</span></p>
+                  {editingCode === s.id ? (
+                    <div className="flex gap-1 mt-2">
+                      <input value={codeDraft} onChange={(e) => setCodeDraft(e.target.value)} className="border border-slate-300 rounded px-2 py-1 text-xs w-24" placeholder="New portal code" autoFocus />
+                      <button
+                        onClick={() => { if (codeDraft.trim()) { onUpdateShopCode(s.id, codeDraft.trim()); setEditingCode(null); } }}
+                        className="text-xs px-2 py-1 rounded text-white" style={{ background: NAVY }}
+                      >
+                        Save
+                      </button>
+                      <button onClick={() => setEditingCode(null)} className="text-xs px-2 py-1 rounded text-slate-500">Cancel</button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between">
+                      <button onClick={() => { setEditingCode(s.id); setCodeDraft(""); }} className="text-[11px] text-slate-400 flex items-center gap-1 hover:text-slate-700">
+                        <Lock className="w-3 h-3" /> Portal code set (change)
+                      </button>
+                      <button
+                        onClick={() => { if (window.confirm(`Remove "${s.name}"? Its sales history stays, but workers there won't be able to log in.`)) onRemoveShop(s.id); }}
+                        className="text-[11px] text-red-400 hover:text-red-600"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                  <button onClick={() => setViewingStockFor(viewingStockFor === s.id ? null : s.id)} className="text-[11px] text-slate-400 hover:text-slate-700 mt-2 block">
+                    {viewingStockFor === s.id ? "Hide stock ▲" : "Manage stock ▼"}
+                  </button>
+                  {viewingStockFor === s.id && (
+                    <div className="mt-3 -mx-1">
+                      <InventoryManager
+                        items={inventory.filter((it) => it.kind === "team" && it.ownerId === s.id)}
+                        onAddItem={onAddItem}
+                        onUpdateItem={onUpdateItem}
+                        onRemoveItem={onRemoveItem}
+                        accent={NAVY}
+                        makeItem={(data) => ({ id: uid(), kind: "team", ownerId: s.id, ...data })}
+                      />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {tab === "workers" && (
+        <div>
+          <p className="text-sm font-semibold text-slate-800 mb-2">Workers</p>
+          {users.length === 0 ? (
+            <div className="text-center text-sm text-slate-400 py-6 border border-dashed border-slate-300 rounded-xl">
+              No workers yet — they'll appear here once they register at a shop.
+            </div>
+          ) : (
+            <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">
+              {users.map((u) => (
+                <div key={u.id} className="flex items-center justify-between px-4 py-2.5">
+                  <div>
+                    <p className="text-sm font-medium text-slate-800">{u.name}</p>
+                    <p className="text-xs text-slate-400">{shopName(u.shopId)}</p>
+                  </div>
+                  {resettingWorker === u.id ? (
+                    <div className="flex gap-2 items-center">
+                      <span className="text-xs text-slate-500">Reset this worker's PIN?</span>
+                      <button onClick={() => handleResetWorkerPin(u)} className="text-xs px-2 py-1 rounded text-white" style={{ background: ORANGE }}>Confirm</button>
+                      <button onClick={() => setResettingWorker(null)} className="text-xs px-2 py-1 rounded text-slate-500">Cancel</button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setResettingWorker(u.id)} className="text-xs text-slate-400 hover:text-slate-700">Reset PIN</button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
+      {tab === "sales" && (
+        <>
+          <div className="flex flex-wrap gap-2 mb-4">
+            <select value={shopFilter} onChange={(e) => { setShopFilter(e.target.value); setWorkerFilter("all"); }} className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm">
+              <option value="all">All Shops</option>
+              {shops.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            <select value={workerFilter} onChange={(e) => setWorkerFilter(e.target.value)} className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm">
+              <option value="all">All Workers</option>
+              {workersInShop.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+            </select>
+          </div>
 
-      {/* Combined filters + totals */}
-      <div className="flex flex-wrap gap-2 mb-4">
-        <select value={shopFilter} onChange={(e) => { setShopFilter(e.target.value); setWorkerFilter("all"); }} className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm">
-          <option value="all">All Shops</option>
-          {shops.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
-        <select value={workerFilter} onChange={(e) => setWorkerFilter(e.target.value)} className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm">
-          <option value="all">All Workers</option>
-          {workersInShop.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-        </select>
-      </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400 flex items-center gap-1"><TrendingUp className="w-3.5 h-3.5" /> Filtered Revenue</p>
+              <p className="text-xl font-semibold figure" style={{ color: NAVY }}>{naira(totalRevenue)}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400 flex items-center gap-1"><Package className="w-3.5 h-3.5" /> Items Sold</p>
+              <p className="text-xl font-semibold figure text-slate-900">{totalItems}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400">Gross Profit</p>
+              <p className="text-xl font-semibold figure" style={{ color: ORANGE }}>{naira(totalProfit)}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400">Total Expenses</p>
+              <p className="text-xl font-semibold figure text-red-600">{naira(expenseTotal)}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400">Net Profit</p>
+              <p className="text-xl font-semibold figure" style={{ color: netProfit >= 0 ? GREEN : ORANGE }}>{naira(netProfit)}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <p className="text-xs text-slate-400">Stock Value</p>
+              <p className="text-xl font-semibold figure text-slate-900">{naira(stockValue)}</p>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4 col-span-2 sm:col-span-3">
+              <p className="text-xs text-slate-400">Outstanding Receivables {shopFilter !== "all" ? `(${shopName(shopFilter)})` : "(all shops)"}</p>
+              <p className="text-xl font-semibold figure" style={{ color: GOLD }}>{naira(outstandingReceivables)}</p>
+            </div>
+          </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400 flex items-center gap-1"><TrendingUp className="w-3.5 h-3.5" /> Filtered Revenue</p>
-          <p className="text-xl font-bold" style={{ color: NAVY }}>{naira(totalRevenue)}</p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400 flex items-center gap-1"><Package className="w-3.5 h-3.5" /> Items Sold</p>
-          <p className="text-xl font-bold text-slate-900">{totalItems}</p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">Gross Profit</p>
-          <p className="text-xl font-bold" style={{ color: ORANGE }}>{naira(totalProfit)}</p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">Total Expenses</p>
-          <p className="text-xl font-bold text-red-600">{naira(expenseTotal)}</p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">Net Profit</p>
-          <p className="text-xl font-bold" style={{ color: netProfit >= 0 ? "#059669" : "#dc2626" }}>{naira(netProfit)}</p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">Stock Value</p>
-          <p className="text-xl font-bold text-slate-900">{naira(stockValue)}</p>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4 col-span-2 sm:col-span-3">
-          <p className="text-xs text-slate-400">Outstanding Receivables {shopFilter !== "all" ? `(${shopName(shopFilter)})` : "(all shops)"}</p>
-          <p className="text-xl font-bold text-amber-600">{naira(outstandingReceivables)}</p>
-        </div>
-      </div>
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-500 text-xs">
+                <tr>
+                  <th className="text-left px-3 py-2">Date</th>
+                  <th className="text-left px-3 py-2">Shop</th>
+                  <th className="text-left px-3 py-2">Worker</th>
+                  <th className="text-left px-3 py-2">Item</th>
+                  <th className="text-right px-3 py-2">Qty</th>
+                  <th className="text-right px-3 py-2">Total</th>
+                  <th className="text-right px-3 py-2">Profit</th>
+                  <th className="px-3 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.length === 0 && <tr><td colSpan={8} className="text-center text-slate-400 py-8">No sales recorded yet for this filter.</td></tr>}
+                {filtered.map((s) => (
+                  <tr key={s.id} className="border-t border-slate-100">
+                    <td className="px-3 py-2">{s.date}</td>
+                    <td className="px-3 py-2">{shopName(s.shopId)}</td>
+                    <td className="px-3 py-2">{s.workerName}</td>
+                    <td className="px-3 py-2">{s.product}</td>
+                    <td className="px-3 py-2 text-right">{s.qty}</td>
+                    <td className="px-3 py-2 text-right font-medium">{naira(s.total)}</td>
+                    <td className="px-3 py-2 text-right text-emerald-700">{naira(s.profit)}</td>
+                    <td className="px-3 py-2 text-right"><button onClick={() => openInvoice(s, "", shopName(s.shopId))} className="text-xs text-slate-400 hover:text-slate-700">Invoice</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
 
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-500 text-xs">
-            <tr>
-              <th className="text-left px-3 py-2">Date</th>
-              <th className="text-left px-3 py-2">Shop</th>
-              <th className="text-left px-3 py-2">Worker</th>
-              <th className="text-left px-3 py-2">Item</th>
-              <th className="text-right px-3 py-2">Qty</th>
-              <th className="text-right px-3 py-2">Total</th>
-              <th className="text-right px-3 py-2">Profit</th>
-              <th className="px-3 py-2"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.length === 0 && <tr><td colSpan={8} className="text-center text-slate-400 py-8">No sales recorded yet for this filter.</td></tr>}
-            {filtered.map((s) => (
-              <tr key={s.id} className="border-t border-slate-100">
-                <td className="px-3 py-2">{s.date}</td>
-                <td className="px-3 py-2">{shopName(s.shopId)}</td>
-                <td className="px-3 py-2">{s.workerName}</td>
-                <td className="px-3 py-2">{s.product}</td>
-                <td className="px-3 py-2 text-right">{s.qty}</td>
-                <td className="px-3 py-2 text-right font-medium">{naira(s.total)}</td>
-                <td className="px-3 py-2 text-right text-emerald-700">{naira(s.profit)}</td>
-                <td className="px-3 py-2 text-right"><button onClick={() => openInvoice(s, "", shopName(s.shopId))} className="text-xs text-slate-400 hover:text-slate-700">Invoice</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="mt-6">
+      {tab === "expenses" && (
         <ExpenseManager
           expenses={scopedExpenses}
           onAddExpense={onAddExpense}
@@ -1847,11 +1970,15 @@ function BossDashboard({ shops, users, sales, inventory, expenses, receivables, 
           accent={NAVY}
           makeExpense={(data) => ({ id: uid(), kind: "team", ownerId: shopFilter === "all" ? (shops[0]?.id || "unassigned") : shopFilter, ...data, createdBy: "Boss" })}
         />
-      </div>
+      )}
 
-      <ReceivablesManager receivables={scopedReceivables} onRecordPayment={onRecordPayment} accent={NAVY} />
+      {tab === "receivables" && (
+        <ReceivablesManager receivables={scopedReceivables} onRecordPayment={onRecordPayment} accent={NAVY} />
+      )}
 
-      <FinancialsView salesRows={filtered} expenseRows={scopedExpenses} receivableRows={scopedReceivables} accent={NAVY} />
-    </div>
+      {tab === "reports" && (
+        <FinancialsView salesRows={filtered} expenseRows={scopedExpenses} receivableRows={scopedReceivables} accent={NAVY} />
+      )}
+    </DashboardShell>
   );
 }
