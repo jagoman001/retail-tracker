@@ -47,11 +47,116 @@ function saleRow(s, opts = {}) {
   row["Payment Method"] = s.paymentMethod;
   return row;
 }
+// Opens a printable invoice for a single sale in a new tab (uses the browser's
+// native print dialog — no PDF library needed, works everywhere).
+function openInvoice(sale, businessName, shopName) {
+  const win = window.open("", "_blank");
+  if (!win) { alert("Please allow pop-ups to generate the invoice."); return; }
+  const balance = sale.paymentMethod === "Credit" || sale.paymentMethod === "Part Payment"
+    ? sale.total - (sale.amountPaidNow || 0) : 0;
+  const paidNow = sale.paymentMethod === "Part Payment" ? (sale.amountPaidNow || 0) : (sale.paymentMethod === "Credit" ? 0 : sale.total);
+  win.document.write(`
+    <html>
+      <head>
+        <title>Invoice - ${sale.id.slice(0, 6).toUpperCase()}</title>
+        <style>
+          body { font-family: Arial, sans-serif; padding: 40px; color: #0B3D56; max-width: 600px; margin: 0 auto; }
+          h1 { font-size: 20px; margin-bottom: 0; }
+          .sub { color: #64748b; font-size: 13px; margin-top: 4px; }
+          table { width: 100%; border-collapse: collapse; margin-top: 24px; }
+          th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e2e8f0; font-size: 14px; }
+          th { color: #64748b; font-size: 12px; text-transform: uppercase; }
+          .right { text-align: right; }
+          .total-row td { font-weight: bold; font-size: 16px; border-top: 2px solid #0B3D56; border-bottom: none; }
+          .meta { margin-top: 24px; font-size: 13px; color: #475569; }
+          .balance { color: #C0501E; font-weight: bold; }
+        </style>
+      </head>
+      <body onload="window.print()">
+        <h1>${businessName}${shopName ? " — " + shopName : ""}</h1>
+        <p class="sub">Invoice #${sale.id.slice(0, 6).toUpperCase()} &nbsp;•&nbsp; ${sale.date}</p>
+        <p class="meta">Customer: <strong>${sale.customerName || "Walk-in"}</strong></p>
+        <table>
+          <thead><tr><th>Item</th><th class="right">Qty</th><th class="right">Unit Price</th><th class="right">Total</th></tr></thead>
+          <tbody>
+            <tr><td>${sale.product}</td><td class="right">${sale.qty}</td><td class="right">${naira(sale.unitPrice)}</td><td class="right">${naira(sale.total)}</td></tr>
+            <tr class="total-row"><td colspan="3">TOTAL</td><td class="right">${naira(sale.total)}</td></tr>
+          </tbody>
+        </table>
+        <p class="meta">Payment method: <strong>${sale.paymentMethod}</strong></p>
+        <p class="meta">Amount paid: <strong>${naira(paidNow)}</strong></p>
+        ${balance > 0 ? `<p class="meta balance">Balance due: ${naira(balance)}${sale.dueDate ? " (due " + sale.dueDate + ")" : ""}</p>` : ""}
+        <p class="meta" style="margin-top:40px;color:#94a3b8;">Thank you for your business.</p>
+      </body>
+    </html>
+  `);
+  win.document.close();
+}
 // If a sale was logged against a tracked inventory item, reduce that item's
 // stock by the quantity sold (never below zero).
 function applySaleToInventory(sale, inventory) {
   if (!sale.inventoryItemId) return inventory;
   return inventory.map((it) => (it.id === sale.inventoryItemId ? { ...it, qty: Math.max(0, it.qty - sale.qty) } : it));
+}
+function receivableStatus(r) {
+  const balance = r.invoiceAmt - r.amountPaid;
+  if (balance <= 0) return "Paid";
+  if (r.dueDate && new Date() > new Date(r.dueDate)) return "Overdue";
+  return "Pending";
+}
+// Credit / Part Payment sales automatically create a receivable to track what's still owed.
+function maybeCreateReceivable(sale) {
+  if (sale.paymentMethod !== "Credit" && sale.paymentMethod !== "Part Payment") return null;
+  const amountPaid = sale.paymentMethod === "Part Payment" ? sale.amountPaidNow || 0 : 0;
+  return {
+    id: uid(), kind: sale.kind, ownerId: sale.kind === "solo" ? sale.businessId : sale.shopId,
+    date: sale.date, customerName: sale.customerName || "Walk-in", item: sale.product,
+    invoiceAmt: sale.total, amountPaid, initialAmountPaid: amountPaid,
+    dueDate: sale.dueDate || "", saleId: sale.id, workerName: sale.workerName,
+  };
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function monthKey(dateStr) { return dateStr ? dateStr.slice(0, 7) : ""; } // "YYYY-MM"
+function monthLabel(dateStr) { return dateStr ? MONTHS[Number(dateStr.slice(5, 7)) - 1] + " " + dateStr.slice(0, 4) : ""; }
+// Builds the Cash Flow / VAT / P&L figures for a given slice of sales/expenses/receivables,
+// grouped by month — mirrors the structure of the original Excel tracker but fully automatic.
+function buildFinancials(salesRows, expenseRows, receivableRows, vatRate = 0.075) {
+  const months = new Set();
+  salesRows.forEach((s) => months.add(monthKey(s.date)));
+  expenseRows.forEach((e) => months.add(monthKey(e.date)));
+  const sortedMonths = Array.from(months).filter(Boolean).sort();
+
+  const perMonth = sortedMonths.map((mk) => {
+    const monthSales = salesRows.filter((s) => monthKey(s.date) === mk);
+    const monthExpenses = expenseRows.filter((e) => monthKey(e.date) === mk);
+    const revenue = monthSales.reduce((a, s) => a + s.total, 0);
+    const cogs = monthSales.reduce((a, s) => a + s.cost * s.qty, 0);
+    const grossProfit = revenue - cogs;
+    const expenseTotal = monthExpenses.reduce((a, e) => a + e.amount, 0);
+    const netProfit = grossProfit - expenseTotal;
+    // Cash actually collected: full total for Cash/POS/Transfer, only the amount paid so far for Credit/Part Payment.
+    const cashCollected = monthSales.reduce((a, s) => a + (s.paymentMethod === "Credit" || s.paymentMethod === "Part Payment" ? s.amountPaidNow || 0 : s.total), 0);
+    const purchases = monthExpenses.filter((e) => e.category === "Stock/Inventory").reduce((a, e) => a + e.amount, 0);
+    const vatCollected = revenue * vatRate;
+    const vatPaid = purchases * vatRate;
+    return { month: monthLabel(mk + "-01"), mk, revenue, cogs, grossProfit, expenseTotal, netProfit, cashCollected, purchases, vatCollected, vatPaid, netVat: vatCollected - vatPaid };
+  });
+
+  const expenseByCategory = {};
+  expenseRows.forEach((e) => { expenseByCategory[e.category || "Other"] = (expenseByCategory[e.category || "Other"] || 0) + e.amount; });
+
+  const receivablesCollectedByMonth = {};
+  // Payments recorded against receivables after the original sale count as "Receivables Collected" cash inflow.
+  receivableRows.forEach((r) => {
+    const extra = r.amountPaid - (r.initialAmountPaid || 0);
+    if (extra > 0) {
+      const mk = monthKey(r.lastPaymentDate || r.date);
+      receivablesCollectedByMonth[mk] = (receivablesCollectedByMonth[mk] || 0) + extra;
+    }
+  });
+
+  return { perMonth, expenseByCategory, receivablesCollectedByMonth };
 }
 // SHA-256 hash via the browser's built-in Web Crypto API — no secret ever
 // touches storage or the source code in plaintext.
@@ -92,6 +197,8 @@ export default function RetailTrackerApp() {
   const [users, setUsers] = useState([]);
   const [sales, setSales] = useState([]);
   const [inventory, setInventory] = useState([]);
+  const [expenses, setExpenses] = useState([]);
+  const [receivables, setReceivables] = useState([]);
   const [soloBiz, setSoloBiz] = useState([]);
   const [bossCodeHash, setBossCodeHash] = useState(null);
   const [bossRecoveryHash, setBossRecoveryHash] = useState(null);
@@ -101,7 +208,7 @@ export default function RetailTrackerApp() {
 
   useEffect(() => {
     (async () => {
-      const [s, u, sl, sb, bch, brh, inv] = await Promise.all([
+      const [s, u, sl, sb, bch, brh, inv, exp, rec] = await Promise.all([
         loadList("shops", []),
         loadList("users", []),
         loadList("sales", []),
@@ -109,6 +216,8 @@ export default function RetailTrackerApp() {
         loadList("boss_code_hash", null),
         loadList("boss_recovery_hash", null),
         loadList("inventory", []),
+        loadList("expenses", []),
+        loadList("receivables", []),
       ]);
       setShops(s);
       setUsers(u);
@@ -117,6 +226,8 @@ export default function RetailTrackerApp() {
       setBossCodeHash(bch);
       setBossRecoveryHash(brh);
       setInventory(inv);
+      setExpenses(exp);
+      setReceivables(rec);
       setLoading(false);
     })();
   }, []);
@@ -171,6 +282,8 @@ export default function RetailTrackerApp() {
           business={currentUser}
           sales={sales}
           inventory={inventory.filter((it) => it.kind === "solo" && it.ownerId === currentUser.id)}
+          expenses={expenses.filter((e) => e.kind === "solo" && e.ownerId === currentUser.id)}
+          receivables={receivables.filter((r) => r.kind === "solo" && r.ownerId === currentUser.id)}
           onLogout={goHome}
           onAddSale={async (sale) => {
             const nextSales = [...sales, sale];
@@ -180,6 +293,12 @@ export default function RetailTrackerApp() {
               const nextInv = applySaleToInventory(sale, inventory);
               setInventory(nextInv);
               await saveList("inventory", nextInv);
+            }
+            const receivable = maybeCreateReceivable(sale);
+            if (receivable) {
+              const nextRec = [...receivables, receivable];
+              setReceivables(nextRec);
+              await saveList("receivables", nextRec);
             }
           }}
           onAddItem={async (item) => {
@@ -196,6 +315,21 @@ export default function RetailTrackerApp() {
             const next = inventory.filter((it) => it.id !== itemId);
             setInventory(next);
             await saveList("inventory", next);
+          }}
+          onAddExpense={async (expense) => {
+            const next = [...expenses, expense];
+            setExpenses(next);
+            await saveList("expenses", next);
+          }}
+          onRemoveExpense={async (expenseId) => {
+            const next = expenses.filter((e) => e.id !== expenseId);
+            setExpenses(next);
+            await saveList("expenses", next);
+          }}
+          onRecordPayment={async (receivableId, amount) => {
+            const next = receivables.map((r) => (r.id === receivableId ? { ...r, amountPaid: r.amountPaid + amount, lastPaymentDate: new Date().toISOString().slice(0, 10) } : r));
+            setReceivables(next);
+            await saveList("receivables", next);
           }}
         />
       )}
@@ -237,6 +371,8 @@ export default function RetailTrackerApp() {
           shop={shops.find((s) => s.id === activeShopId)}
           sales={sales}
           inventory={inventory.filter((it) => it.kind === "team" && it.ownerId === activeShopId)}
+          expenses={expenses.filter((e) => e.kind === "team" && e.ownerId === activeShopId)}
+          receivables={receivables.filter((r) => r.kind === "team" && r.ownerId === activeShopId)}
           onLogout={goHome}
           onAddSale={async (sale) => {
             const nextSales = [...sales, sale];
@@ -246,6 +382,12 @@ export default function RetailTrackerApp() {
               const nextInv = applySaleToInventory(sale, inventory);
               setInventory(nextInv);
               await saveList("inventory", nextInv);
+            }
+            const receivable = maybeCreateReceivable(sale);
+            if (receivable) {
+              const nextRec = [...receivables, receivable];
+              setReceivables(nextRec);
+              await saveList("receivables", nextRec);
             }
           }}
           onAddItem={async (item) => {
@@ -262,6 +404,21 @@ export default function RetailTrackerApp() {
             const next = inventory.filter((it) => it.id !== itemId);
             setInventory(next);
             await saveList("inventory", next);
+          }}
+          onAddExpense={async (expense) => {
+            const next = [...expenses, expense];
+            setExpenses(next);
+            await saveList("expenses", next);
+          }}
+          onRemoveExpense={async (expenseId) => {
+            const next = expenses.filter((e) => e.id !== expenseId);
+            setExpenses(next);
+            await saveList("expenses", next);
+          }}
+          onRecordPayment={async (receivableId, amount) => {
+            const next = receivables.map((r) => (r.id === receivableId ? { ...r, amountPaid: r.amountPaid + amount, lastPaymentDate: new Date().toISOString().slice(0, 10) } : r));
+            setReceivables(next);
+            await saveList("receivables", next);
           }}
         />
       )}
@@ -338,6 +495,23 @@ export default function RetailTrackerApp() {
             const next = inventory.filter((it) => it.id !== itemId);
             setInventory(next);
             await saveList("inventory", next);
+          }}
+          expenses={expenses}
+          receivables={receivables}
+          onAddExpense={async (expense) => {
+            const next = [...expenses, expense];
+            setExpenses(next);
+            await saveList("expenses", next);
+          }}
+          onRemoveExpense={async (expenseId) => {
+            const next = expenses.filter((e) => e.id !== expenseId);
+            setExpenses(next);
+            await saveList("expenses", next);
+          }}
+          onRecordPayment={async (receivableId, amount) => {
+            const next = receivables.map((r) => (r.id === receivableId ? { ...r, amountPaid: r.amountPaid + amount, lastPaymentDate: new Date().toISOString().slice(0, 10) } : r));
+            setReceivables(next);
+            await saveList("receivables", next);
           }}
         />
       )}
@@ -509,16 +683,20 @@ function SoloLogin({ soloBiz, onBack, onSuccess, onCreate, onResetPin }) {
   );
 }
 
-function SoloDashboard({ business, sales, inventory, onLogout, onAddSale, onAddItem, onUpdateItem, onRemoveItem }) {
+function SoloDashboard({ business, sales, inventory, expenses, receivables, onLogout, onAddSale, onAddItem, onUpdateItem, onRemoveItem, onAddExpense, onRemoveExpense, onRecordPayment }) {
   const mySales = useMemo(
     () => sales.filter((s) => s.kind === "solo" && s.businessId === business.id).sort((a, b) => (a.date < b.date ? 1 : -1)),
     [sales, business.id]
   );
-  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "", paymentMethod: "Cash" });
+  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "", customerName: "", paymentMethod: "Cash", amountPaidNow: "", dueDate: "" });
 
   const totalToday = mySales.filter((s) => s.date === form.date).reduce((a, s) => a + s.total, 0);
   const totalAll = mySales.reduce((a, s) => a + s.total, 0);
   const profitAll = mySales.reduce((a, s) => a + s.profit, 0);
+  const expenseTotal = expenses.reduce((a, e) => a + e.amount, 0);
+  const netProfit = profitAll - expenseTotal;
+  const stockValue = inventory.reduce((a, it) => a + it.qty * it.cost, 0);
+  const outstandingReceivables = receivables.reduce((a, r) => a + Math.max(0, r.invoiceAmt - r.amountPaid), 0);
 
   function pickInventoryItem(itemId) {
     if (itemId === "__custom__") {
@@ -541,10 +719,12 @@ function SoloDashboard({ business, sales, inventory, onLogout, onAddSale, onAddI
     onAddSale({
       id: uid(), kind: "solo", businessId: business.id, workerId: business.id, workerName: business.name,
       date: form.date, product: form.product, category: form.category || "General",
-      qty, unitPrice, cost, paymentMethod: form.paymentMethod, total, profit,
+      qty, unitPrice, cost, customerName: form.customerName || "Walk-in", paymentMethod: form.paymentMethod, total, profit,
       inventoryItemId: form.itemId || null,
+      amountPaidNow: form.paymentMethod === "Part Payment" ? Number(form.amountPaidNow) || 0 : undefined,
+      dueDate: form.paymentMethod === "Credit" || form.paymentMethod === "Part Payment" ? form.dueDate : undefined,
     });
-    setForm((f) => ({ ...f, itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "" }));
+    setForm((f) => ({ ...f, itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "", customerName: "", amountPaidNow: "", dueDate: "" }));
   }
 
   return (
@@ -561,24 +741,38 @@ function SoloDashboard({ business, sales, inventory, onLogout, onAddSale, onAddI
         onClick={() => exportToExcel(`${business.name}-sales.xlsx`, [
           { name: "Sales", rows: mySales.map((s) => saleRow(s)) },
           { name: "Inventory", rows: inventory.map((it) => ({ Item: it.name, "In Stock": it.qty, "Cost/unit (₦)": it.cost, "Price/unit (₦)": it.price })) },
+          { name: "Expenses", rows: expenses.map((e) => ({ Date: e.date, Description: e.description, Category: e.category, "Amount (₦)": e.amount, "Paid By": e.paidBy, "Receipt #": e.receiptNo, Notes: e.notes })) },
+          { name: "Receivables", rows: receivables.map((r) => ({ Date: r.date, Customer: r.customerName, Item: r.item, "Invoice Amt (₦)": r.invoiceAmt, "Amount Paid (₦)": r.amountPaid, "Balance (₦)": r.invoiceAmt - r.amountPaid, Status: receivableStatus(r) })) },
         ])}
         className="mb-4 flex items-center gap-1.5 text-sm font-medium border border-slate-300 rounded-lg px-3 py-1.5 text-slate-700 hover:bg-slate-50"
       >
         <Download className="w-4 h-4" /> Download Excel
       </button>
 
-      <div className="grid grid-cols-3 gap-3 mb-6">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
         <div className="bg-white border border-slate-200 rounded-xl p-4">
           <p className="text-xs text-slate-400">Today</p>
           <p className="text-lg font-bold text-slate-900">{naira(totalToday)}</p>
         </div>
         <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">All-time Revenue</p>
+          <p className="text-xs text-slate-400">Total Revenue</p>
           <p className="text-lg font-bold" style={{ color: NAVY }}>{naira(totalAll)}</p>
         </div>
         <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">All-time Profit</p>
-          <p className="text-lg font-bold" style={{ color: ORANGE }}>{naira(profitAll)}</p>
+          <p className="text-xs text-slate-400">Total Expenses</p>
+          <p className="text-lg font-bold text-red-600">{naira(expenseTotal)}</p>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <p className="text-xs text-slate-400">Net Profit</p>
+          <p className="text-lg font-bold" style={{ color: ORANGE }}>{naira(netProfit)}</p>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <p className="text-xs text-slate-400">Stock Value</p>
+          <p className="text-lg font-bold text-slate-900">{naira(stockValue)}</p>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <p className="text-xs text-slate-400">Outstanding Receivables</p>
+          <p className="text-lg font-bold text-amber-600">{naira(outstandingReceivables)}</p>
         </div>
       </div>
 
@@ -587,8 +781,9 @@ function SoloDashboard({ business, sales, inventory, onLogout, onAddSale, onAddI
         <div className="grid grid-cols-2 gap-2 mb-2">
           <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2 sm:col-span-1" />
           <select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
-            <option>Cash</option><option>Transfer</option><option>POS</option>
+            <option>Cash</option><option>Transfer</option><option>POS</option><option>Credit</option><option>Part Payment</option>
           </select>
+          <input placeholder="Customer name (optional)" value={form.customerName} onChange={(e) => setForm({ ...form, customerName: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
           <select value={form.itemId || "__custom__"} onChange={(e) => pickInventoryItem(e.target.value)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2">
             <option value="__custom__">— Custom item (not tracked in stock) —</option>
             {inventory.map((it) => <option key={it.id} value={it.id}>{it.name} ({it.qty} in stock)</option>)}
@@ -598,9 +793,29 @@ function SoloDashboard({ business, sales, inventory, onLogout, onAddSale, onAddI
           <input type="number" placeholder="Qty sold" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
           <input type="number" placeholder="Unit price (₦)" value={form.unitPrice} onChange={(e) => setForm({ ...form, unitPrice: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
           <input type="number" placeholder="Cost per item (₦)" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+          {(form.paymentMethod === "Credit" || form.paymentMethod === "Part Payment") && (
+            <>
+              {form.paymentMethod === "Part Payment" && (
+                <input type="number" placeholder="Amount paid now (₦)" value={form.amountPaidNow} onChange={(e) => setForm({ ...form, amountPaidNow: e.target.value })} className="border border-amber-300 rounded-lg px-2 py-1.5 text-sm" />
+              )}
+              <input type="date" placeholder="Due date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} className={`border border-amber-300 rounded-lg px-2 py-1.5 text-sm ${form.paymentMethod === "Credit" ? "col-span-2" : ""}`} />
+            </>
+          )}
         </div>
         <button type="submit" className="w-full text-white rounded-lg py-2 text-sm font-medium mt-1" style={{ background: NAVY }}>Add Sale</button>
       </form>
+
+      <ExpenseManager
+        expenses={expenses}
+        onAddExpense={onAddExpense}
+        onRemoveExpense={onRemoveExpense}
+        accent={NAVY}
+        makeExpense={(data) => ({ id: uid(), kind: "solo", ownerId: business.id, ...data })}
+      />
+
+      <ReceivablesManager receivables={receivables} onRecordPayment={onRecordPayment} accent={NAVY} />
+
+      <FinancialsView salesRows={mySales} expenseRows={expenses} receivableRows={receivables} accent={NAVY} />
 
       <InventoryManager
         items={inventory}
@@ -615,16 +830,17 @@ function SoloDashboard({ business, sales, inventory, onLogout, onAddSale, onAddI
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-500 text-xs">
-            <tr><th className="text-left px-3 py-2">Date</th><th className="text-left px-3 py-2">Item</th><th className="text-right px-3 py-2">Qty</th><th className="text-right px-3 py-2">Total</th></tr>
+            <tr><th className="text-left px-3 py-2">Date</th><th className="text-left px-3 py-2">Item</th><th className="text-right px-3 py-2">Qty</th><th className="text-right px-3 py-2">Total</th><th className="px-3 py-2"></th></tr>
           </thead>
           <tbody>
-            {mySales.length === 0 && <tr><td colSpan={4} className="text-center text-slate-400 py-6">No sales logged yet.</td></tr>}
+            {mySales.length === 0 && <tr><td colSpan={5} className="text-center text-slate-400 py-6">No sales logged yet.</td></tr>}
             {mySales.map((s) => (
               <tr key={s.id} className="border-t border-slate-100">
                 <td className="px-3 py-2">{s.date}</td>
                 <td className="px-3 py-2">{s.product}</td>
                 <td className="px-3 py-2 text-right">{s.qty}</td>
                 <td className="px-3 py-2 text-right font-medium">{naira(s.total)}</td>
+                <td className="px-3 py-2 text-right"><button onClick={() => openInvoice(s, business.name)} className="text-xs text-slate-400 hover:text-slate-700">Invoice</button></td>
               </tr>
             ))}
           </tbody>
@@ -884,12 +1100,12 @@ function WorkerLogin({ shop, users, onBack, onSuccess, onCreateUser }) {
 }
 
 // ============================================================== WORKER DASHBOARD
-function WorkerDashboard({ user, shop, sales, inventory, onLogout, onAddSale, onAddItem, onUpdateItem, onRemoveItem }) {
+function WorkerDashboard({ user, shop, sales, inventory, expenses, receivables, onLogout, onAddSale, onAddItem, onUpdateItem, onRemoveItem, onAddExpense, onRemoveExpense, onRecordPayment }) {
   const mySales = useMemo(
     () => sales.filter((s) => s.kind === "team" && s.workerId === user.id).sort((a, b) => (a.date < b.date ? 1 : -1)),
     [sales, user.id]
   );
-  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "", paymentMethod: "Cash" });
+  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "", customerName: "", paymentMethod: "Cash", amountPaidNow: "", dueDate: "" });
   const totalToday = mySales.filter((s) => s.date === form.date).reduce((a, s) => a + s.total, 0);
 
   function pickInventoryItem(itemId) {
@@ -913,10 +1129,12 @@ function WorkerDashboard({ user, shop, sales, inventory, onLogout, onAddSale, on
     onAddSale({
       id: uid(), kind: "team", shopId: shop.id, workerId: user.id, workerName: user.name,
       date: form.date, product: form.product, category: form.category || "General",
-      qty, unitPrice, cost, paymentMethod: form.paymentMethod, total, profit,
+      qty, unitPrice, cost, customerName: form.customerName || "Walk-in", paymentMethod: form.paymentMethod, total, profit,
       inventoryItemId: form.itemId || null,
+      amountPaidNow: form.paymentMethod === "Part Payment" ? Number(form.amountPaidNow) || 0 : undefined,
+      dueDate: form.paymentMethod === "Credit" || form.paymentMethod === "Part Payment" ? form.dueDate : undefined,
     });
-    setForm((f) => ({ ...f, itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "" }));
+    setForm((f) => ({ ...f, itemId: "", product: "", category: "", qty: "", unitPrice: "", cost: "", customerName: "", amountPaidNow: "", dueDate: "" }));
   }
 
   return (
@@ -933,6 +1151,8 @@ function WorkerDashboard({ user, shop, sales, inventory, onLogout, onAddSale, on
         onClick={() => exportToExcel(`${user.name}-sales.xlsx`, [
           { name: "My Sales", rows: mySales.map((s) => saleRow(s)) },
           { name: "Shop Inventory", rows: inventory.map((it) => ({ Item: it.name, "In Stock": it.qty, "Cost/unit (₦)": it.cost, "Price/unit (₦)": it.price })) },
+          { name: "Shop Expenses", rows: expenses.map((e) => ({ Date: e.date, Description: e.description, Category: e.category, "Amount (₦)": e.amount, "Paid By": e.paidBy, "Receipt #": e.receiptNo, Notes: e.notes })) },
+          { name: "Shop Receivables", rows: receivables.map((r) => ({ Date: r.date, Customer: r.customerName, Item: r.item, "Invoice Amt (₦)": r.invoiceAmt, "Amount Paid (₦)": r.amountPaid, "Balance (₦)": r.invoiceAmt - r.amountPaid, Status: receivableStatus(r) })) },
         ])}
         className="mb-4 flex items-center gap-1.5 text-sm font-medium border border-slate-300 rounded-lg px-3 py-1.5 text-slate-700 hover:bg-slate-50"
       >
@@ -955,8 +1175,9 @@ function WorkerDashboard({ user, shop, sales, inventory, onLogout, onAddSale, on
         <div className="grid grid-cols-2 gap-2 mb-2">
           <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2 sm:col-span-1" />
           <select value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
-            <option>Cash</option><option>Transfer</option><option>POS</option>
+            <option>Cash</option><option>Transfer</option><option>POS</option><option>Credit</option><option>Part Payment</option>
           </select>
+          <input placeholder="Customer name (optional)" value={form.customerName} onChange={(e) => setForm({ ...form, customerName: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
           <select value={form.itemId || "__custom__"} onChange={(e) => pickInventoryItem(e.target.value)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2">
             <option value="__custom__">— Custom item (not tracked in stock) —</option>
             {inventory.map((it) => <option key={it.id} value={it.id}>{it.name} ({it.qty} in stock)</option>)}
@@ -966,9 +1187,27 @@ function WorkerDashboard({ user, shop, sales, inventory, onLogout, onAddSale, on
           <input type="number" placeholder="Qty sold" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
           <input type="number" placeholder="Unit price (₦)" value={form.unitPrice} onChange={(e) => setForm({ ...form, unitPrice: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
           <input type="number" placeholder="Cost per item (₦)" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+          {(form.paymentMethod === "Credit" || form.paymentMethod === "Part Payment") && (
+            <>
+              {form.paymentMethod === "Part Payment" && (
+                <input type="number" placeholder="Amount paid now (₦)" value={form.amountPaidNow} onChange={(e) => setForm({ ...form, amountPaidNow: e.target.value })} className="border border-amber-300 rounded-lg px-2 py-1.5 text-sm" />
+              )}
+              <input type="date" placeholder="Due date" value={form.dueDate} onChange={(e) => setForm({ ...form, dueDate: e.target.value })} className={`border border-amber-300 rounded-lg px-2 py-1.5 text-sm ${form.paymentMethod === "Credit" ? "col-span-2" : ""}`} />
+            </>
+          )}
         </div>
         <button type="submit" className="w-full text-white rounded-lg py-2 text-sm font-medium mt-1" style={{ background: ORANGE }}>Add Sale</button>
       </form>
+
+      <ExpenseManager
+        expenses={expenses}
+        onAddExpense={onAddExpense}
+        onRemoveExpense={onRemoveExpense}
+        accent={ORANGE}
+        makeExpense={(data) => ({ id: uid(), kind: "team", ownerId: shop.id, ...data, createdBy: user.name })}
+      />
+
+      <ReceivablesManager receivables={receivables} onRecordPayment={onRecordPayment} accent={ORANGE} />
 
       <InventoryManager
         items={inventory}
@@ -983,16 +1222,17 @@ function WorkerDashboard({ user, shop, sales, inventory, onLogout, onAddSale, on
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-500 text-xs">
-            <tr><th className="text-left px-3 py-2">Date</th><th className="text-left px-3 py-2">Item</th><th className="text-right px-3 py-2">Qty</th><th className="text-right px-3 py-2">Total</th></tr>
+            <tr><th className="text-left px-3 py-2">Date</th><th className="text-left px-3 py-2">Item</th><th className="text-right px-3 py-2">Qty</th><th className="text-right px-3 py-2">Total</th><th className="px-3 py-2"></th></tr>
           </thead>
           <tbody>
-            {mySales.length === 0 && <tr><td colSpan={4} className="text-center text-slate-400 py-6">No sales logged yet.</td></tr>}
+            {mySales.length === 0 && <tr><td colSpan={5} className="text-center text-slate-400 py-6">No sales logged yet.</td></tr>}
             {mySales.map((s) => (
               <tr key={s.id} className="border-t border-slate-100">
                 <td className="px-3 py-2">{s.date}</td>
                 <td className="px-3 py-2">{s.product}</td>
                 <td className="px-3 py-2 text-right">{s.qty}</td>
                 <td className="px-3 py-2 text-right font-medium">{naira(s.total)}</td>
+                <td className="px-3 py-2 text-right"><button onClick={() => openInvoice(s, shop?.name || "", null)} className="text-xs text-slate-400 hover:text-slate-700">Invoice</button></td>
               </tr>
             ))}
           </tbody>
@@ -1085,7 +1325,219 @@ function InventoryManager({ items, onAddItem, onUpdateItem, onRemoveItem, accent
 }
 
 
-function BossDashboard({ shops, users, sales, inventory, onLogout, onUpdateShopCode, onAddShop, onRenameShop, onRemoveShop, onResetWorkerPin, onAddItem, onUpdateItem, onRemoveItem }) {
+// ============================================================== EXPENSES
+const EXPENSE_CATEGORIES = ["Stock/Inventory", "Rent & Utilities", "Salaries & Wages", "Transport", "Marketing", "Miscellaneous"];
+function ExpenseManager({ expenses, onAddExpense, onRemoveExpense, accent, makeExpense }) {
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), description: "", category: EXPENSE_CATEGORIES[0], amount: "", paidBy: "Cash", receiptNo: "", notes: "" });
+  const total = expenses.reduce((a, e) => a + e.amount, 0);
+
+  function submit() {
+    if (!form.description.trim() || !(Number(form.amount) > 0)) return;
+    onAddExpense(makeExpense({ ...form, amount: Number(form.amount) }));
+    setForm((f) => ({ ...f, description: "", amount: "", receiptNo: "", notes: "" }));
+    setAdding(false);
+  }
+
+  return (
+    <div className="mb-6">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-sm font-semibold text-slate-800">Expenses <span className="text-xs font-normal text-slate-400">({naira(total)} total)</span></p>
+        {!adding && (
+          <button onClick={() => setAdding(true)} className="flex items-center gap-1 text-xs font-medium text-white rounded-lg px-2.5 py-1" style={{ background: accent }}>
+            <Plus className="w-3.5 h-3.5" /> Add Expense
+          </button>
+        )}
+      </div>
+      {adding && (
+        <div className="bg-white border border-slate-200 rounded-xl p-3 mb-3 grid grid-cols-2 gap-2">
+          <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
+          <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
+            {EXPENSE_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+          </select>
+          <input autoFocus placeholder="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm col-span-2" />
+          <input type="number" placeholder="Amount (₦)" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
+          <select value={form.paidBy} onChange={(e) => setForm({ ...form, paidBy: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
+            <option>Cash</option><option>Transfer</option><option>POS</option>
+          </select>
+          <input placeholder="Receipt # (optional)" value={form.receiptNo} onChange={(e) => setForm({ ...form, receiptNo: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
+          <input placeholder="Notes (optional)" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" />
+          <div className="col-span-2 flex gap-2">
+            <button onClick={submit} className="flex-1 text-white rounded-lg py-1.5 text-sm font-medium" style={{ background: accent }}>Save Expense</button>
+            <button onClick={() => setAdding(false)} className="px-3 text-sm text-slate-500">Cancel</button>
+          </div>
+        </div>
+      )}
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        {expenses.length === 0 && !adding && <p className="text-center text-sm text-slate-400 py-6">No expenses logged yet.</p>}
+        {expenses.length > 0 && (
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-500 text-xs">
+              <tr><th className="text-left px-3 py-2">Date</th><th className="text-left px-3 py-2">Description</th><th className="text-left px-3 py-2">Category</th><th className="text-right px-3 py-2">Amount</th><th className="px-3 py-2"></th></tr>
+            </thead>
+            <tbody>
+              {expenses.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).map((e) => (
+                <tr key={e.id} className="border-t border-slate-100">
+                  <td className="px-3 py-2">{e.date}</td>
+                  <td className="px-3 py-2">{e.description}</td>
+                  <td className="px-3 py-2 text-slate-500">{e.category}</td>
+                  <td className="px-3 py-2 text-right font-medium">{naira(e.amount)}</td>
+                  <td className="px-3 py-2 text-right"><button onClick={() => onRemoveExpense(e.id)} className="text-xs text-red-400 hover:text-red-600">Remove</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================== RECEIVABLES
+function ReceivablesManager({ receivables, onRecordPayment, accent }) {
+  const [payingId, setPayingId] = useState(null);
+  const [amountDraft, setAmountDraft] = useState("");
+  const totalOwed = receivables.reduce((a, r) => a + Math.max(0, r.invoiceAmt - r.amountPaid), 0);
+  const badge = { Paid: "bg-emerald-50 text-emerald-700", Pending: "bg-amber-50 text-amber-700", Overdue: "bg-red-50 text-red-700" };
+
+  return (
+    <div className="mb-6">
+      <p className="text-sm font-semibold text-slate-800 mb-2">Receivables (credit sales) <span className="text-xs font-normal text-slate-400">({naira(totalOwed)} outstanding)</span></p>
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        {receivables.length === 0 && <p className="text-center text-sm text-slate-400 py-6">No credit sales yet — these appear automatically when a sale is logged as Credit or Part Payment.</p>}
+        {receivables.length > 0 && (
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-500 text-xs">
+              <tr><th className="text-left px-3 py-2">Date</th><th className="text-left px-3 py-2">Customer</th><th className="text-left px-3 py-2">Item</th><th className="text-right px-3 py-2">Owed</th><th className="text-center px-3 py-2">Status</th><th className="px-3 py-2"></th></tr>
+            </thead>
+            <tbody>
+              {receivables.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).map((r) => {
+                const status = receivableStatus(r);
+                const balance = r.invoiceAmt - r.amountPaid;
+                return (
+                  <tr key={r.id} className="border-t border-slate-100">
+                    <td className="px-3 py-2">{r.date}</td>
+                    <td className="px-3 py-2">{r.customerName}</td>
+                    <td className="px-3 py-2">{r.item}</td>
+                    <td className="px-3 py-2 text-right font-medium">{naira(balance)}</td>
+                    <td className="px-3 py-2 text-center"><span className={`text-[11px] px-2 py-0.5 rounded-full ${badge[status]}`}>{status}</span></td>
+                    <td className="px-3 py-2 text-right">
+                      {status !== "Paid" && (
+                        payingId === r.id ? (
+                          <span className="inline-flex gap-1 items-center">
+                            <input type="number" placeholder="₦ paid" value={amountDraft} onChange={(e) => setAmountDraft(e.target.value)} className="w-20 border border-slate-300 rounded px-1 py-0.5 text-xs" autoFocus />
+                            <button onClick={() => { const amt = Number(amountDraft) || 0; if (amt > 0) { onRecordPayment(r.id, Math.min(amt, balance)); } setPayingId(null); setAmountDraft(""); }} className="text-xs px-1.5 py-0.5 rounded text-white" style={{ background: accent }}>Save</button>
+                          </span>
+                        ) : (
+                          <button onClick={() => setPayingId(r.id)} className="text-xs text-slate-400 hover:text-slate-700">Record Payment</button>
+                        )
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================== FINANCIALS (Cash Flow / VAT / P&L)
+// Boss-level (and solo-owner-level) reporting — fully automatic from sales + expenses, no manual monthly entry needed.
+function FinancialsView({ salesRows, expenseRows, receivableRows, accent }) {
+  const [tab, setTab] = useState("cashflow");
+  const { perMonth, expenseByCategory, receivablesCollectedByMonth } = useMemo(
+    () => buildFinancials(salesRows, expenseRows, receivableRows),
+    [salesRows, expenseRows, receivableRows]
+  );
+
+  const totalRevenue = salesRows.reduce((a, s) => a + s.total, 0);
+  const totalCogs = salesRows.reduce((a, s) => a + s.cost * s.qty, 0);
+  const grossProfit = totalRevenue - totalCogs;
+  const totalOpEx = expenseRows.reduce((a, e) => a + e.amount, 0);
+  const netProfit = grossProfit - totalOpEx;
+
+  return (
+    <div className="mb-6">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-sm font-semibold text-slate-800">Financial Reports</p>
+        <div className="flex rounded-lg bg-slate-100 p-1 text-xs">
+          {[["cashflow", "Cash Flow"], ["vat", "VAT Tracker"], ["pl", "P&L Statement"]].map(([key, label]) => (
+            <button key={key} onClick={() => setTab(key)} className={`px-2.5 py-1 rounded-md ${tab === key ? "bg-white shadow font-medium" : "text-slate-500"}`}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      {perMonth.length === 0 ? (
+        <div className="bg-white border border-slate-200 rounded-xl p-6 text-center text-sm text-slate-400">
+          No dated sales or expenses yet — reports build automatically as you log sales and expenses.
+        </div>
+      ) : tab === "cashflow" ? (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-500 text-xs">
+              <tr><th className="text-left px-3 py-2">Month</th><th className="text-right px-3 py-2">Sales Cash In</th><th className="text-right px-3 py-2">Receivables Collected</th><th className="text-right px-3 py-2">Total Inflow</th><th className="text-right px-3 py-2">Expenses (Outflow)</th><th className="text-right px-3 py-2">Net Cash Flow</th></tr>
+            </thead>
+            <tbody>
+              {perMonth.map((m) => {
+                const recCollected = receivablesCollectedByMonth[m.mk] || 0;
+                const inflow = m.cashCollected + recCollected;
+                return (
+                  <tr key={m.mk} className="border-t border-slate-100">
+                    <td className="px-3 py-2 font-medium">{m.month}</td>
+                    <td className="px-3 py-2 text-right">{naira(m.cashCollected)}</td>
+                    <td className="px-3 py-2 text-right">{naira(recCollected)}</td>
+                    <td className="px-3 py-2 text-right font-medium" style={{ color: NAVY }}>{naira(inflow)}</td>
+                    <td className="px-3 py-2 text-right text-red-600">{naira(m.expenseTotal)}</td>
+                    <td className={`px-3 py-2 text-right font-semibold ${inflow - m.expenseTotal >= 0 ? "text-emerald-600" : "text-red-600"}`}>{naira(inflow - m.expenseTotal)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : tab === "vat" ? (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-x-auto">
+          <p className="text-xs text-slate-400 px-3 pt-2">Nigeria FIRS rate: 7.5%. "Purchases" = expenses categorized as Stock/Inventory.</p>
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-500 text-xs">
+              <tr><th className="text-left px-3 py-2">Month</th><th className="text-right px-3 py-2">Sales Revenue</th><th className="text-right px-3 py-2">VAT Collected</th><th className="text-right px-3 py-2">Purchases</th><th className="text-right px-3 py-2">VAT Paid</th><th className="text-right px-3 py-2">Net VAT Payable</th></tr>
+            </thead>
+            <tbody>
+              {perMonth.map((m) => (
+                <tr key={m.mk} className="border-t border-slate-100">
+                  <td className="px-3 py-2 font-medium">{m.month}</td>
+                  <td className="px-3 py-2 text-right">{naira(m.revenue)}</td>
+                  <td className="px-3 py-2 text-right">{naira(m.vatCollected)}</td>
+                  <td className="px-3 py-2 text-right">{naira(m.purchases)}</td>
+                  <td className="px-3 py-2 text-right">{naira(m.vatPaid)}</td>
+                  <td className="px-3 py-2 text-right font-semibold" style={{ color: accent }}>{naira(m.netVat)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="bg-white border border-slate-200 rounded-xl p-4 text-sm">
+          <div className="flex justify-between py-1"><span className="text-slate-500">Total Sales Revenue</span><span className="font-medium">{naira(totalRevenue)}</span></div>
+          <div className="flex justify-between py-1"><span className="text-slate-500">Less: Cost of Goods Sold</span><span className="font-medium text-red-600">-{naira(totalCogs)}</span></div>
+          <div className="flex justify-between py-1.5 border-t border-slate-200 font-semibold"><span>GROSS PROFIT</span><span style={{ color: NAVY }}>{naira(grossProfit)}</span></div>
+          <p className="text-xs font-semibold text-slate-500 uppercase mt-3 mb-1">Operating Expenses</p>
+          {Object.entries(expenseByCategory).length === 0 && <p className="text-xs text-slate-400 py-1">No expenses logged yet.</p>}
+          {Object.entries(expenseByCategory).map(([cat, amt]) => (
+            <div key={cat} className="flex justify-between py-1"><span className="text-slate-500">{cat}</span><span>{naira(amt)}</span></div>
+          ))}
+          <div className="flex justify-between py-1.5 border-t border-slate-200 font-semibold"><span>TOTAL OPERATING EXPENSES</span><span className="text-red-600">{naira(totalOpEx)}</span></div>
+          <div className="flex justify-between py-2 border-t-2 border-slate-300 font-bold text-base mt-1"><span>NET PROFIT</span><span style={{ color: netProfit >= 0 ? "#059669" : "#dc2626" }}>{naira(netProfit)}</span></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BossDashboard({ shops, users, sales, inventory, expenses, receivables, onLogout, onUpdateShopCode, onAddShop, onRenameShop, onRemoveShop, onResetWorkerPin, onAddItem, onUpdateItem, onRemoveItem, onAddExpense, onRemoveExpense, onRecordPayment }) {
   const [viewingStockFor, setViewingStockFor] = useState(null);
   const [shopFilter, setShopFilter] = useState("all");
   const [workerFilter, setWorkerFilter] = useState("all");
@@ -1127,6 +1579,14 @@ function BossDashboard({ shops, users, sales, inventory, onLogout, onUpdateShopC
   const totalProfit = filtered.reduce((a, s) => a + s.profit, 0);
   const totalItems = filtered.reduce((a, s) => a + s.qty, 0);
 
+  const scopedExpenses = shopFilter === "all" ? expenses : expenses.filter((e) => e.ownerId === shopFilter);
+  const scopedReceivables = shopFilter === "all" ? receivables : receivables.filter((r) => r.ownerId === shopFilter);
+  const scopedInventory = shopFilter === "all" ? inventory : inventory.filter((it) => it.ownerId === shopFilter);
+  const expenseTotal = scopedExpenses.reduce((a, e) => a + e.amount, 0);
+  const netProfit = totalProfit - expenseTotal;
+  const stockValue = scopedInventory.reduce((a, it) => a + it.qty * it.cost, 0);
+  const outstandingReceivables = scopedReceivables.reduce((a, r) => a + Math.max(0, r.invoiceAmt - r.amountPaid), 0);
+
   function shopName(id) { return shops.find((s) => s.id === id)?.name || id; }
   function shopStats(id) {
     const rows = teamSales.filter((s) => s.shopId === id);
@@ -1157,6 +1617,8 @@ function BossDashboard({ shops, users, sales, inventory, onLogout, onUpdateShopC
             { name: "Summary by Shop", rows: summaryRows },
             { name: "Sales (filtered)", rows: filtered.map((s) => saleRow(s, { shop: true, worker: true, shopName: shopName(s.shopId) })) },
             { name: "Inventory (all shops)", rows: inventory.filter((it) => it.kind === "team").map((it) => ({ Shop: shopName(it.ownerId), Item: it.name, "In Stock": it.qty, "Cost/unit (₦)": it.cost, "Price/unit (₦)": it.price })) },
+            { name: "Expenses", rows: scopedExpenses.map((e) => ({ Shop: shopName(e.ownerId), Date: e.date, Description: e.description, Category: e.category, "Amount (₦)": e.amount, "Paid By": e.paidBy, "Receipt #": e.receiptNo })) },
+            { name: "Receivables", rows: scopedReceivables.map((r) => ({ Shop: shopName(r.ownerId), Date: r.date, Customer: r.customerName, Item: r.item, "Invoice Amt (₦)": r.invoiceAmt, "Amount Paid (₦)": r.amountPaid, "Balance (₦)": r.invoiceAmt - r.amountPaid, Status: receivableStatus(r) })) },
           ]);
         }}
         className="mb-4 flex items-center gap-1.5 text-sm font-medium border border-slate-300 rounded-lg px-3 py-1.5 text-slate-700 hover:bg-slate-50"
@@ -1314,7 +1776,7 @@ function BossDashboard({ shops, users, sales, inventory, onLogout, onUpdateShopC
         </select>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
         <div className="bg-white border border-slate-200 rounded-xl p-4">
           <p className="text-xs text-slate-400 flex items-center gap-1"><TrendingUp className="w-3.5 h-3.5" /> Filtered Revenue</p>
           <p className="text-xl font-bold" style={{ color: NAVY }}>{naira(totalRevenue)}</p>
@@ -1324,8 +1786,24 @@ function BossDashboard({ shops, users, sales, inventory, onLogout, onUpdateShopC
           <p className="text-xl font-bold text-slate-900">{totalItems}</p>
         </div>
         <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-400">Filtered Profit</p>
+          <p className="text-xs text-slate-400">Gross Profit</p>
           <p className="text-xl font-bold" style={{ color: ORANGE }}>{naira(totalProfit)}</p>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <p className="text-xs text-slate-400">Total Expenses</p>
+          <p className="text-xl font-bold text-red-600">{naira(expenseTotal)}</p>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <p className="text-xs text-slate-400">Net Profit</p>
+          <p className="text-xl font-bold" style={{ color: netProfit >= 0 ? "#059669" : "#dc2626" }}>{naira(netProfit)}</p>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <p className="text-xs text-slate-400">Stock Value</p>
+          <p className="text-xl font-bold text-slate-900">{naira(stockValue)}</p>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4 col-span-2 sm:col-span-3">
+          <p className="text-xs text-slate-400">Outstanding Receivables {shopFilter !== "all" ? `(${shopName(shopFilter)})` : "(all shops)"}</p>
+          <p className="text-xl font-bold text-amber-600">{naira(outstandingReceivables)}</p>
         </div>
       </div>
 
@@ -1340,10 +1818,11 @@ function BossDashboard({ shops, users, sales, inventory, onLogout, onUpdateShopC
               <th className="text-right px-3 py-2">Qty</th>
               <th className="text-right px-3 py-2">Total</th>
               <th className="text-right px-3 py-2">Profit</th>
+              <th className="px-3 py-2"></th>
             </tr>
           </thead>
           <tbody>
-            {filtered.length === 0 && <tr><td colSpan={7} className="text-center text-slate-400 py-8">No sales recorded yet for this filter.</td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={8} className="text-center text-slate-400 py-8">No sales recorded yet for this filter.</td></tr>}
             {filtered.map((s) => (
               <tr key={s.id} className="border-t border-slate-100">
                 <td className="px-3 py-2">{s.date}</td>
@@ -1353,11 +1832,26 @@ function BossDashboard({ shops, users, sales, inventory, onLogout, onUpdateShopC
                 <td className="px-3 py-2 text-right">{s.qty}</td>
                 <td className="px-3 py-2 text-right font-medium">{naira(s.total)}</td>
                 <td className="px-3 py-2 text-right text-emerald-700">{naira(s.profit)}</td>
+                <td className="px-3 py-2 text-right"><button onClick={() => openInvoice(s, "", shopName(s.shopId))} className="text-xs text-slate-400 hover:text-slate-700">Invoice</button></td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      <div className="mt-6">
+        <ExpenseManager
+          expenses={scopedExpenses}
+          onAddExpense={onAddExpense}
+          onRemoveExpense={onRemoveExpense}
+          accent={NAVY}
+          makeExpense={(data) => ({ id: uid(), kind: "team", ownerId: shopFilter === "all" ? (shops[0]?.id || "unassigned") : shopFilter, ...data, createdBy: "Boss" })}
+        />
+      </div>
+
+      <ReceivablesManager receivables={scopedReceivables} onRecordPayment={onRecordPayment} accent={NAVY} />
+
+      <FinancialsView salesRows={filtered} expenseRows={scopedExpenses} receivableRows={scopedReceivables} accent={NAVY} />
     </div>
   );
 }
